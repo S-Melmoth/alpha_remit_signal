@@ -1,0 +1,5 @@
+candidate_id,signal_type,lookback,threshold,parameters
+momentum_streak_2d,spike_policy,2,,"{""consecutive_declines"": 2}"
+momentum_streak_3d,spike_policy,3,,"{""consecutive_declines"": 3}"
+momentum_streak_4d,spike_policy,4,,"{""consecutive_declines"": 4}"
+momentum_streak_5d,spike_policy,5,,"{""consecutive_declines"": 5}"

@@ -1,0 +1,67 @@
+{
+  "input": "data/processed/cbr_fx_daily_2010-01-01_2026-09-02.csv",
+  "history_start": "2014-01-01",
+  "report_start": "2023-09-02",
+  "data_as_of": "2026-09-02",
+  "evaluation_years": 3,
+  "horizons": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "research_horizons": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "cooldown_observations": 3,
+  "momentum_cooldown_observations": 0,
+  "momentum_trigger": "first day on which rub_per_unit has declined for N consecutive published observations",
+  "random_repeats": 300,
+  "seed": 42,
+  "random_baseline_primary": "same evaluated signal count in the full currency-period",
+  "random_baseline_robustness": "same evaluated signal count in each ISO publication week",
+  "quality_scope": "three separately selected families: spike, level, stable-corridor exit",
+  "favourable_now_hit_target": "no lower rub_per_unit appears in T+1 ... T+h; used by momentum, level and corridor exit down",
+  "level_hit_target": "no lower rub_per_unit appears in T+1 ... T+h; the level condition is the causal trigger, not the target",
+  "local_min_diagnostic": "T is minimum rub_per_unit in T-h ... T+h; diagnostic only",
+  "spike_policy_grid_size": 4,
+  "level_policy_grid_size": 16,
+  "corridor_exit_policy_grid_size": 72,
+  "benefit_definition": "(mean rub_per_unit in T-h...T+h / rub_per_unit at T - 1) * 10000",
+  "benefit_inference": "95% calendar-month block-bootstrap CI and one-sided centered-bootstrap p-value for mean benefit > 0",
+  "window_closing_hit_target": "rub_per_unit at T+h is higher than at T",
+  "waiting_cost_diagnostic": "forward_change_bps only; never replaces required benefit_bps",
+  "selection_horizons": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "min_train_years": 4,
+  "recent_years": [
+    3
+  ],
+  "walk_forward_selection": "annual and separate for every required horizon; only labels matured before fold start",
+  "selection_ranking": "sample gate, lift >= 1.2, benefit >= -5 bp, then continuous lift and benefit; frequency is diagnostic only",
+  "hard_signal_screen": {
+    "source": "walk-forward metrics in the trailing evaluation window",
+    "lift_floor": 1.2,
+    "benefit_floor_bps": -5.0,
+    "stability_rule": "both floors must hold in every requested currency/horizon cell",
+    "frequency_used_as_filter": false
+  },
+  "relaxed_walk_forward_candidates": {
+    "lift_floor": 1.15,
+    "mean_benefit_floor_bps": 0.0,
+    "benefit_significance_flag": "95% lower bound > 0 and one-sided p-value < 0.05"
+  },
+  "fixed_level_policy_screen": {
+    "scope": "all requested currencies and horizons in the trailing evaluation window",
+    "exploratory_rule": "min lift >= 1.2 and min benefit >= -5 bp",
+    "case_rule": "min lift >= 1.3 and benefit 95% lower bound > 0 in every cell",
+    "warning": "retrospective development screen; not a replacement for walk-forward"
+  }
+}
