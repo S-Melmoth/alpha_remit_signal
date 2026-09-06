@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f2f3f5" />
+    <meta name="description" content="Интерактивный демонстрационный прототип перевода за рубеж по номеру телефона, воссозданный по PDF." />
+    <title>Перевод за рубеж · Прототип</title>
+    <link rel="icon" href="/assets/bank-alfa.png" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/schedule-offer.css" />
+  <link rel="stylesheet" href="/experience.css" />
+  </head>
+  <body>
+    <header class="studio-header"><a class="brand" href="/" aria-label="Начало прототипа"><span class="alfa-mark">А<span></span></span><span>Альфа-Банк</span></a><span class="prototype-badge"><i></i> Интерактивный прототип</span><a class="pdf-link" href="/reference.pdf" target="_blank" rel="noopener">Исходный PDF <span>↗</span></a></header>
+    <main class="studio">
+      <aside class="guide">
+        <div class="eyebrow">ПЕРЕВОДЫ ЗА РУБЕЖ</div>
+        <h1>Ближе,<br>чем кажется.</h1>
+        <p class="guide-intro">Перевод по номеру телефона.<br>От первого касания до отправки.</p>
+        <ol id="steps" class="steps" aria-label="Шаги прототипа"></ol>
+        <div class="demo-note"><span class="demo-dot"></span><p>Демонстрационный режим<br><span>Деньги не списываются. Данные и курс — из примера в PDF.</span></p></div>
+      </aside>
+      <section class="device-area" aria-label="Мобильное приложение">
+        <div class="device" id="device"><div class="hardware-button one"></div><div class="hardware-button two"></div><div class="hardware-button three"></div><div class="phone" id="phone"><div class="dynamic-island" aria-hidden="true"><i></i></div><div id="app"></div><div class="home-indicator" aria-hidden="true"></div><div id="toast" class="toast" role="status"></div></div></div>
+        <div class="device-toolbar"><button id="reset" type="button">↻ Начать заново</button><span></span><button id="reference-toggle" type="button">◫ Экран из PDF</button></div>
+      </section>
+      <aside class="context"><span class="context-number" id="context-number">01 / 08</span><h2 id="context-title">Начните с платежей</h2><p id="context-description">В разделе «Переводы» выберите «Переводы за рубеж».</p><div class="context-line"></div><span class="context-label">ПО ОРИГИНАЛЬНОМУ МАКЕТУ</span><p class="context-small">Экраны, изображения и порядок действий восстановлены из вашего PDF.</p><button class="walkthrough" id="start-demo">Пройти сценарий <span>↗</span></button></aside>
+    </main>
+    <footer class="studio-footer"><span>Дизайн по transfer-by-phone-number_RUS.pdf</span><span>8 шагов · 4 страны · Один номер телефона</span></footer>
+    <dialog id="reference-dialog"><div class="reference-heading"><div><span class="eyebrow">ОРИГИНАЛ ИЗ PDF</span><h2 id="reference-title"></h2></div><button id="reference-close" class="close-button" aria-label="Закрыть оригинал">×</button></div><img id="reference-image" alt="Исходный экран из PDF" /><p>Исходное изображение для сравнения с прототипом.</p></dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

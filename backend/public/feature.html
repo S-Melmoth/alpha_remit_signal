@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f4f0">
+  <meta name="description" content="Интерактивная демонстрация умных трансграничных переводов">
+  <title>Умный перевод · Интерактивный сценарий</title>
+  <link rel="icon" href="/assets/alfa-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/feature.css">
+  <link rel="stylesheet" href="/experience.css">
+</head>
+<body>
+  <header class="demo-header">
+    <a class="demo-brand" href="/"><img src="/assets/alfa-mark.svg" alt="" width="22" height="29"><span>Ближе, чем кажется</span></a>
+    <nav aria-label="Сценарии">
+      <button id="feature-picker" type="button" aria-haspopup="listbox"><span id="feature-short">Сценарий</span><i>⌄</i></button>
+      <a href="/payments">Обычный перевод ↗</a>
+    </nav>
+  </header>
+  <main class="demo-main">
+    <section class="explanation" aria-labelledby="feature-title">
+      <p class="kicker" id="feature-kicker"></p>
+      <h1 id="feature-title"></h1>
+      <p class="lead" id="feature-lead"></p>
+      <div class="mode-row"><span>Посмотреть тип реализации</span><div class="segmented" role="group" aria-label="Тип реализации"><button type="button" data-mode="product" aria-pressed="true">Product</button><button type="button" data-mode="tech" aria-pressed="false">Tech</button></div></div>
+      <div id="explanation-content" aria-live="polite"></div>
+      <section class="event-controls" aria-labelledby="event-title"><div class="event-heading"><h2 id="event-title">Попробуйте сами</h2><span>Синтетический сценарий</span></div><div id="event-controls"></div><p id="event-status" role="status">Открываем приложение…</p></section>
+    </section>
+    <section class="phone-stage" aria-label="Прототип телефона">
+      <div class="stage-label"><span>LIVE PROTOTYPE</span><i></i><b id="stage-step">Открываем приложение</b></div>
+      <div class="phone-shell"><span class="phone-button phone-left"></span><span class="phone-button phone-right"></span><div class="phone-screen"><iframe id="payments-frame" title="Кликабельный прототип Альфа-Банка" src="about:blank"></iframe></div></div>
+      <div class="journey-controls"><button id="open-app" type="button">Открыть банк</button><button id="show-desktop" type="button">Экран телефона</button></div><p class="phone-help">Нажимайте на элементы внутри телефона.<br>Формы, переводы и история работают как в /payments.</p>
+    </section>
+  </main>
+  <div class="picker-popover" id="picker-popover" hidden role="listbox" aria-label="Выберите сценарий"></div>
+  <dialog id="data-dialog"><div class="data-head"><div><span class="kicker">СИНТЕТИЧЕСКИЕ ДАННЫЕ</span><h2 id="data-title"></h2></div><button id="data-close" type="button" aria-label="Закрыть">×</button></div><p id="data-caption"></p><div class="data-table-wrap"><table id="data-table"></table></div><p class="data-foot">Данные созданы для демонстрации. Персональные и реальные банковские данные не используются.</p></dialog>
+  <script type="module" src="/feature-host.js"></script>
+</body>
+</html>
