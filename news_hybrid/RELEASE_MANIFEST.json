@@ -1,0 +1,114 @@
+{
+  "schema_version": "alfa-news-hybrid.release.v1",
+  "status": "PASS",
+  "created_at": "2026-09-06T22:27:07.216001+00:00",
+  "package_version": "1.0.0",
+  "selected_policy": "L5_NEWS_Q85",
+  "target_horizon_days": 10,
+  "source_experiment_status": "COMPLETE",
+  "technical_audit_status": "PASS",
+  "source_handoff_sha256": "918de38f8c8635316b172a1a8979a780ebaae47fe121328b1db1de82420602e3",
+  "technical_audit_sha256": "8889f09b9a4ee25bc43bd5e5bbfff5b711cfb421f4e04b4c4f62cce6a5e34bfd",
+  "metrics_sha256": "33309661267733c1518830543d1a2ac72070c90fcca67c2ae025f90f4a11fe4a",
+  "parity": {
+    "rows": 4495,
+    "folds": 8,
+    "max_abs_score_difference": 0.0,
+    "atol": 1e-12,
+    "per_fold": {
+      "2023_h1": {
+        "rows": 590,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "2fa46ad9d25cf0f03885e0b6b1f8b56632fb2569bb0b9349c06f0e7614e9a402",
+        "exported_json_sha256": "dc7ab0b1f2ce5da05eed2277871e0e96cdd926e2020439c536bb3363d8814a0f"
+      },
+      "2023_h2": {
+        "rows": 645,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "a7bba49206a283bc47b1cc302750085f95e6280836e5267912d5a79cfe5f37f9",
+        "exported_json_sha256": "464fd71b35c5f54477f3fdc8efbec4dc9b57b0efc0f05cdd395c109bca580f96"
+      },
+      "2024_h1": {
+        "rows": 585,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "60c4c7fbc080d31f2f4129955933add1ad8ea495f2ebd414403d1673c89760c2",
+        "exported_json_sha256": "4ab08d53e3e12f5a6fc96a2036101494eae682f44b4f5fc523624f17b6af6495"
+      },
+      "2024_h2": {
+        "rows": 655,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "d9603b6c3cefa2f703e49157f77ce8eb8150ba964f08ae122d32e3b2f7fe3eb1",
+        "exported_json_sha256": "cd3071f245575e03f78332d539e889f45f75a0ec5258e49330d9437ad1aaeac3"
+      },
+      "2025_h1": {
+        "rows": 585,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "232ddbbccc56c47d6a0bc07a20ba32cea68ed3f9d112e882c841f1a102ae2ed3",
+        "exported_json_sha256": "c80efcb83978e3faa69ada6ccb68af4d8c8355b62a43e9385706e0a15aae4bb0"
+      },
+      "2025_h2": {
+        "rows": 650,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "cc1da4746d189d459d3d83adfd3805acc75950fd06e6b0184955524d1137c7c9",
+        "exported_json_sha256": "e47821b2fc277334cc519351762c6e3affa302db9fbb0faaf311d78a5f340f90"
+      },
+      "2026_h1": {
+        "rows": 585,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "8d77f642088fa91488c0af2840f6c95edd104b502341401e5a0d6dbd7f24e9e5",
+        "exported_json_sha256": "0e44736562d6bb7583f765ef2c71b747785e0fdc5561df6b5688155ec02b9c23"
+      },
+      "2026_h2": {
+        "rows": 200,
+        "max_abs_score_difference": 0.0,
+        "source_joblib_sha256": "6de4062fd28b3680b7b0e16cb3e593c00206e92719196819487d31f501a8848a",
+        "exported_json_sha256": "ced752fcfd2e65d2e09b77d556cbe11d28aa264ab601ee8c843021001c6f797e"
+      }
+    }
+  },
+  "runtime_dependencies": [],
+  "contains_joblib_or_pickle": false,
+  "contains_raw_or_training_data": false,
+  "production_delivery_enabled": false,
+  "verification": {
+    "package_tests": {
+      "status": "PASS",
+      "passed": 50
+    },
+    "compileall": "PASS",
+    "clean_wheel_install": "PASS"
+  },
+  "files": {
+    ".gitignore": "4ab92a2a6cf98eca95b899263e20cca1b4a87787f3b4063226abdab264f2185a",
+    "examples/use_from_python.py": "274d772542411b2c5b61a2bab7e3d41b2b38f4154e0077121d5171c1f0652d69",
+    "INTEGRATION.md": "80db25ad2dc076acff0c747152c23898293d72d67b1326a83259239c89d3f01d",
+    "METRICS.md": "c365fd29abcb23f06e57e0ee53d53c8c21e2531fa0cdd0b710c612c11c81403b",
+    "pyproject.toml": "df672394daead79b4bc8143f29baa6aa64b4d5392a4db5d5b7b648c7bced7825",
+    "README.md": "3f9102ec92290afa3ecdefbf41671777b66696a46c983abf7718ecbee9c15371",
+    "src/news_hybrid/__init__.py": "cdc66a044527a5942f44491c9d145c4757377abc6bec207d0c60d266d71a3f69",
+    "src/news_hybrid/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "src/news_hybrid/artifacts/l5_news_2023_h1.json": "dc7ab0b1f2ce5da05eed2277871e0e96cdd926e2020439c536bb3363d8814a0f",
+    "src/news_hybrid/artifacts/l5_news_2023_h2.json": "464fd71b35c5f54477f3fdc8efbec4dc9b57b0efc0f05cdd395c109bca580f96",
+    "src/news_hybrid/artifacts/l5_news_2024_h1.json": "4ab08d53e3e12f5a6fc96a2036101494eae682f44b4f5fc523624f17b6af6495",
+    "src/news_hybrid/artifacts/l5_news_2024_h2.json": "cd3071f245575e03f78332d539e889f45f75a0ec5258e49330d9437ad1aaeac3",
+    "src/news_hybrid/artifacts/l5_news_2025_h1.json": "c80efcb83978e3faa69ada6ccb68af4d8c8355b62a43e9385706e0a15aae4bb0",
+    "src/news_hybrid/artifacts/l5_news_2025_h2.json": "e47821b2fc277334cc519351762c6e3affa302db9fbb0faaf311d78a5f340f90",
+    "src/news_hybrid/artifacts/l5_news_2026_h1.json": "0e44736562d6bb7583f765ef2c71b747785e0fdc5561df6b5688155ec02b9c23",
+    "src/news_hybrid/artifacts/l5_news_2026_h2.json": "ced752fcfd2e65d2e09b77d556cbe11d28aa264ab601ee8c843021001c6f797e",
+    "src/news_hybrid/cbr.py": "e9007905ac9fd4fb61bf1d4089597aa66cf6f85f3e24bfaf248c90aa99428492",
+    "src/news_hybrid/cli.py": "272730c2f3854e570f82243618f96e970984c090a9e5d96f4a04ca30976d163f",
+    "src/news_hybrid/contracts.py": "0cba5d7947a3931dc8515af54d82434afc5a1b448d97126332f17ba98d9af309",
+    "src/news_hybrid/engine.py": "d063df2db3746d9d9622fc679e96dc6a5623b7c35a5ae89e575c6344e48dcf79",
+    "src/news_hybrid/feature_builder.py": "2998bdf6391793259a181f8d6024dc655cd0becd560819846f901c3827fbebae",
+    "src/news_hybrid/news_features.py": "562a356b12dcbb56c5cb749a005b7f6cf9fb409a0878a40dd0cf3c48afa24efd",
+    "src/news_hybrid/predictor.py": "224a4507b783263d25001dfb43414fcb05d41cbca3332db27f0e08e3181eccd4",
+    "src/news_hybrid/service.py": "49fd4ce43c46c1ecc4e32814cc1d2840b73ba1faa5577c337aa83ce891b0af2e",
+    "src/news_hybrid/text.py": "6d752ad5d462f2b2cd0f419ba7457fc76ed40e2e809aa7aa6474ba178e6f8784",
+    "tests/parity_cases.json": "c1bdbca35fd1ca6cd647857cdb0051ae2528e852323e761d7e4ce07a7fda5f60",
+    "tests/test_contracts.py": "64c1419440c5330dcaa07cd60b4bb33c0d180735448990fb5c40a334113679c6",
+    "tests/test_engine.py": "475c450c55e211ecef5e8f54145c0856fddedae524ccd4f8d7b16a31a3f36daa",
+    "tests/test_feature_builder.py": "5e3f77e78a146b44a8c426dfe94a7d41c8c2386764548cb9fa98dac5ea86c44b",
+    "tests/test_news_features.py": "d16de1a8a040c0fa159651f75a32dbbec5b2f8739e86ffdaeb5f90e00b8ba90e",
+    "tests/test_predictor.py": "5ebb4cbf784a1d4eb926026e96501811c004d4c5c7c7ad249d6147dbbd0ed647"
+  }
+}
