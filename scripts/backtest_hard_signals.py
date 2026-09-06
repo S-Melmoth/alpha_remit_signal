@@ -372,11 +372,13 @@ def monthly_block_bootstrap_mean(
     seed: int,
     confidence: float = 0.95,
 ) -> dict[str, float]:
-    """CI and one-sided p-value for mean(values) > 0.
+    """Percentile CI and one-sided bootstrap tail probability for mean > 0.
 
     Whole calendar months are resampled to retain dependence between nearby
-    and overlapping signal outcomes.  The null distribution is constructed
-    from observations centered to mean zero.
+    and overlapping signal outcomes.  The one-sided value is the smoothed
+    bootstrap probability of a non-positive mean. Computing it from the same
+    distribution as the percentile interval keeps both inference summaries
+    coherent when calendar blocks contain different numbers of signals.
     """
     clean = values.dropna().astype(float).sort_index()
     if clean.empty:
@@ -395,13 +397,18 @@ def monthly_block_bootstrap_mean(
     denominators = block_counts[sampled].sum(axis=1)
     bootstrap_means = block_sums[sampled].sum(axis=1) / denominators
     alpha = 1.0 - confidence
-    ci_low, ci_high = np.quantile(
+    percentile_low, percentile_high = np.quantile(
         bootstrap_means, [alpha / 2.0, 1.0 - alpha / 2.0]
     )
 
-    centered_sums = block_sums - observed * block_counts
-    null_means = centered_sums[sampled].sum(axis=1) / denominators
+    # Test H0: mean <= 0 by centring the block-bootstrap distribution at zero.
+    # Using P(bootstrap_mean <= 0) would leave the distribution centred at the
+    # observed effect and is a confidence-tail measure, not a null test.
+    null_means = bootstrap_means - observed
     p_value = (1 + (null_means >= observed).sum()) / (repeats + 1)
+    # Use the same centred error distribution for the interval and the test.
+    ci_low = 2.0 * observed - percentile_high
+    ci_high = 2.0 * observed - percentile_low
     return {
         "ci_low": float(ci_low),
         "ci_high": float(ci_high),

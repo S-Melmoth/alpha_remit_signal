@@ -23,3 +23,25 @@ venv/
 # Temporary files
 *.tmp
 *.log
+
+# instructions
+/AGENTS.md
+/docs/decisions.md
+/docs/experiment_spec.md
+
+# unused data
+/data/raw/
+/data/processed/hard_signals/
+/data/processed/cbr_fx_daily_2019-01-01_2026-09-02.csv
+/data/processed/cbr_fx_eda_summary_*.csv
+/data/processed/ml_binary_truth/
+/data/processed/ml_candidate_gate/
+/data/processed/ml_currency_calibration/
+/data/processed/ml_horizon_tuning/
+/data/processed/ml_joint_policy/
+/data/processed/ml_nightly_tuning/
+/data/processed/ml_regret_regression/
+/data/processed/ml_signals/
+/data/processed/ml_stability_tuning/
+/data/processed/ml_training_windows/
+/data/raw/brent_fred_daily.csv

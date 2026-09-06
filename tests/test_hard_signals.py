@@ -335,6 +335,17 @@ class HardSignalTest(unittest.TestCase):
             closing.loc[dates[2], "benefit_bps"],
         )
 
+    def test_monthly_bootstrap_interval_and_one_sided_tail_are_coherent(self) -> None:
+        dates = pd.date_range("2022-01-01", periods=730, freq="D")
+        values = pd.Series(10.0, index=dates)
+        inference = monthly_block_bootstrap_mean(values, repeats=300, seed=42)
+        self.assertGreater(inference["ci_low"], 0.0)
+        self.assertLess(inference["p_value"], 0.05)
+
+        negative = monthly_block_bootstrap_mean(-values, repeats=300, seed=42)
+        self.assertLess(negative["ci_high"], 0.0)
+        self.assertGreater(negative["p_value"], 0.95)
+
 
 if __name__ == "__main__":
     unittest.main()
