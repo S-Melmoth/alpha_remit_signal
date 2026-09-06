@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: behaviour
+      POSTGRES_USER: behaviour
+      POSTGRES_PASSWORD: behaviour_demo
+    ports:
+      - "127.0.0.1:${BEHAVIOUR_DB_PORT:-5433}:5432"
+    volumes:
+      - behaviour_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U behaviour -d behaviour"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  behaviour:
+    build: ./behaviour
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgres://behaviour:behaviour_demo@db:5432/behaviour?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["demo", "--as-of", "2026-09-01T00:00:00+03:00"]
+
+  behaviour-api:
+    build: ./behaviour
+    profiles: ["services"]
+    environment:
+      DATABASE_URL: postgres://behaviour:behaviour_demo@db:5432/behaviour?sslmode=disable
+      HTTP_ADDR: 0.0.0.0:8080
+      DEMO_MODE: "true"
+      DEMO_NOW: "2026-09-05T18:00:00+03:00"
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      db: { condition: service_healthy }
+    command: ["serve"]
+
+  pusher:
+    build: ./behaviour
+    profiles: ["services"]
+    entrypoint: ["pusher"]
+    environment:
+      DATABASE_URL: postgres://behaviour:behaviour_demo@db:5432/behaviour?sslmode=disable
+      HTTP_ADDR: 0.0.0.0:8081
+      POLL_SECONDS: "30"
+      DEMO_MODE: "true"
+      DEMO_NOW: "2026-09-05T18:00:00+03:00"
+    ports: ["127.0.0.1:8081:8081"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  payment-scheduler:
+    build: ./behaviour
+    profiles: ["services"]
+    entrypoint: ["payment-scheduler"]
+    environment:
+      DATABASE_URL: postgres://behaviour:behaviour_demo@db:5432/behaviour?sslmode=disable
+      HTTP_ADDR: 0.0.0.0:8082
+      POLL_SECONDS: "30"
+      DEMO_MODE: "true"
+      DEMO_NOW: "2026-09-05T18:00:00+03:00"
+    ports: ["127.0.0.1:8082:8082"]
+    depends_on:
+      db: { condition: service_healthy }
+
+volumes:
+  behaviour_data:
