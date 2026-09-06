@@ -38,6 +38,29 @@ from backtest_hard_signals import (
 # Required horizons from the case.
 HORIZONS = (1, 3, 5, 10, 20)
 COUNTRY_BY_CURRENCY = {"AMD": "AM", "KGS": "KG", "KZT": "KZ", "TJS": "TJ", "UZS": "UZ"}
+CURRENCY_COPY = {
+    "AMD": {"genitive": "армянского драма", "unit": "драм", "country": "Армению"},
+    "KGS": {"genitive": "киргизского сома", "unit": "сом", "country": "Кыргызстан"},
+    "KZT": {"genitive": "казахстанского тенге", "unit": "тенге", "country": "Казахстан"},
+    "TJS": {"genitive": "таджикского сомони", "unit": "сомони", "country": "Таджикистан"},
+    "UZS": {"genitive": "узбекского сума", "unit": "сум", "country": "Узбекистан"},
+}
+PRODUCTION_SIGNAL_COLUMNS = [
+    "date",
+    "corridor",
+    "indicator",
+    "direction",
+    "strength",
+    "speed",
+    "recommended_scenario",
+    "signal_source",
+    "explanation_indicator",
+    "template_id",
+    "push_title",
+    "push_text",
+    "currency",
+    "rub_per_unit",
+]
 MODEL_CONFIGS = ("long_history", "rolling_4y")
 TRAINING_WINDOW_CONFIGS = (
     "rolling_1y",
@@ -1432,9 +1455,11 @@ def evaluate_fold(
                 .le(5)
                 .mean()
             )
-            benefit_significant = bool(
-                benefit["ci_low"] > 0 and benefit["p_value"] < 0.05
-            )
+            # The case asks whether mean benefit is significantly greater than
+            # zero, so the decision rule is the one-sided test H1: mean > 0.
+            # The two-sided 95% interval remains a separate diagnostic and is
+            # intentionally not combined with the p-value.
+            benefit_significant = bool(benefit["p_value"] < 0.05)
         else:
             truth_random = local_random = np.nan
             benefit = {"ci_low": np.nan, "ci_high": np.nan, "p_value": np.nan}
@@ -3738,6 +3763,240 @@ def evaluate_signal_stream_across_horizons(
     return metrics, summary, common_end
 
 
+def match_delayed_hard_confirmations(
+    ml_signals: pd.DataFrame,
+    hard_signals: pd.DataFrame,
+    prices: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    max_wait_observations: int = 5,
+) -> pd.DataFrame:
+    """Pair each sent ML signal with the first unused later hard confirmation.
+
+    Matching is chronological within a corridor and uses publication indices,
+    not calendar days. A hard event can confirm at most one ML episode. Future
+    rows are used only for retrospective evaluation of the waiting policy.
+    """
+    if max_wait_observations < 0:
+        raise ValueError("max_wait_observations must be non-negative")
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    market = prices.loc[prices["currency"].isin(TARGET_CURRENCIES), [
+        "date", "currency", "rub_per_unit"
+    ]].sort_values(["currency", "date"]).copy()
+    market["market_observation_index"] = market.groupby("currency").cumcount()
+    lookup = market.set_index(["currency", "date"])[
+        ["rub_per_unit", "market_observation_index"]
+    ]
+
+    ml = ml_signals.loc[
+        ml_signals["date"].ge(start) & ml_signals["date"].lt(end)
+    ].drop_duplicates(["currency", "date"]).sort_values(["currency", "date"])
+    hard = hard_signals.loc[
+        hard_signals["date"].ge(start) & hard_signals["date"].lt(end)
+    ].copy()
+    hard = (
+        hard.groupby(["currency", "date"], as_index=False)
+        .agg(confirmation_families=("signal_family", lambda x: "+".join(sorted(set(x)))))
+        .sort_values(["currency", "date"])
+    )
+    rows: list[dict[str, object]] = []
+    for currency in TARGET_CURRENCIES:
+        fast = ml.loc[ml["currency"].eq(currency)]
+        confirmations = hard.loc[hard["currency"].eq(currency)].copy()
+        if fast.empty:
+            continue
+        confirmations["slow_observation_index"] = [
+            int(lookup.loc[(currency, pd.Timestamp(date)), "market_observation_index"])
+            for date in confirmations["date"]
+        ]
+        used_confirmation_rows: set[int] = set()
+        for _, signal in fast.iterrows():
+            fast_date = pd.Timestamp(signal["date"])
+            fast_price = float(lookup.loc[(currency, fast_date), "rub_per_unit"])
+            fast_index = int(
+                lookup.loc[(currency, fast_date), "market_observation_index"]
+            )
+            candidates = confirmations.loc[
+                confirmations.index.map(lambda value: value not in used_confirmation_rows)
+                & confirmations["slow_observation_index"].ge(fast_index)
+                & confirmations["slow_observation_index"].le(
+                    fast_index + max_wait_observations
+                )
+            ]
+            if candidates.empty:
+                rows.append(
+                    {
+                        "currency": currency,
+                        "fast_date": fast_date,
+                        "fast_price": fast_price,
+                        "confirmed": False,
+                        "slow_date": pd.NaT,
+                        "slow_price": np.nan,
+                        "slow_observation_index": np.nan,
+                        "delay_observations": np.nan,
+                        "delay_calendar_days": np.nan,
+                        "waiting_cost_bps": np.nan,
+                        "confirmation_families": "",
+                    }
+                )
+                continue
+            confirmation_index = int(candidates.index[0])
+            confirmation = candidates.loc[confirmation_index]
+            used_confirmation_rows.add(confirmation_index)
+            slow_date = pd.Timestamp(confirmation["date"])
+            slow_price = float(lookup.loc[(currency, slow_date), "rub_per_unit"])
+            rows.append(
+                {
+                    "currency": currency,
+                    "fast_date": fast_date,
+                    "fast_price": fast_price,
+                    "confirmed": True,
+                    "slow_date": slow_date,
+                    "slow_price": slow_price,
+                    "slow_observation_index": int(
+                        confirmation["slow_observation_index"]
+                    ),
+                    "delay_observations": int(
+                        confirmation["slow_observation_index"] - fast_index
+                    ),
+                    "delay_calendar_days": int((slow_date - fast_date).days),
+                    "waiting_cost_bps": (slow_price / fast_price - 1.0) * 10_000,
+                    "confirmation_families": confirmation["confirmation_families"],
+                }
+            )
+    return pd.DataFrame(rows).sort_values(["currency", "fast_date"]).reset_index(drop=True)
+
+
+def waiting_cost_summary(
+    pairs: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Summarise confirmation coverage, delay, and paired waiting cost."""
+    rows: list[dict[str, object]] = []
+    for currency in TARGET_CURRENCIES:
+        group = pairs.loc[pairs["currency"].eq(currency)]
+        confirmed = group.loc[group["confirmed"]].copy()
+        inference = (
+            monthly_block_bootstrap_mean(
+                confirmed.set_index("fast_date")["waiting_cost_bps"],
+                RANDOM_REPEATS,
+                deterministic_seed(43, "waiting-cost", currency),
+            )
+            if not confirmed.empty
+            else {"ci_low": np.nan, "ci_high": np.nan, "p_value": np.nan}
+        )
+        rows.append(
+            {
+                "currency": currency,
+                "ml_signals": len(group),
+                "confirmed_signals": len(confirmed),
+                "confirmation_rate": len(confirmed) / len(group) if len(group) else np.nan,
+                "median_delay_observations": confirmed["delay_observations"].median(),
+                "p90_delay_observations": confirmed["delay_observations"].quantile(0.90),
+                "mean_waiting_cost_bps": confirmed["waiting_cost_bps"].mean(),
+                "median_waiting_cost_bps": confirmed["waiting_cost_bps"].median(),
+                "p90_adverse_waiting_cost_bps": confirmed["waiting_cost_bps"].quantile(0.90),
+                "waiting_cost_ci_low_95": inference["ci_low"],
+                "waiting_cost_ci_high_95": inference["ci_high"],
+                "waiting_cost_p_value_gt_zero": inference["p_value"],
+                "immediate_signals_per_week": len(group) / weeks_in_period(start, end),
+                "confirmed_signals_per_week": len(confirmed) / weeks_in_period(start, end),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def run_waiting_cost_analysis(root: Path) -> None:
+    """Compare immediate ML delivery with waiting for a causal hard fact."""
+    ml_dir = root / "data/processed/ml_cross_h_11_to_10"
+    hard_dir = root / "data/processed/hard_signals"
+    required = [
+        ml_dir / "ml_plus_reminders.csv.gz",
+        hard_dir / "walk_forward_signals.csv.gz",
+        hard_dir / "alternative_walk_forward_signals.csv.gz",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Run cross-h reproduction, calendar-reminders, and hard backtest first; "
+            f"missing: {missing}"
+        )
+    prices = load_ml_prices(latest_default_input())
+    combined = pd.read_csv(ml_dir / "ml_plus_reminders.csv.gz", parse_dates=["date"])
+    immediate = combined.loc[combined["signal_source"].eq("ml")].copy()
+    spike = pd.read_csv(hard_dir / "walk_forward_signals.csv.gz", parse_dates=["date"])
+    spike = spike.assign(signal_family="momentum")
+    alternative = pd.read_csv(
+        hard_dir / "alternative_walk_forward_signals.csv.gz", parse_dates=["date"]
+    )
+    alternative = alternative.loc[
+        alternative["signal_family"].isin(["level", "corridor_exit_down"])
+    ]
+    hard = pd.concat(
+        [spike[["date", "currency", "signal_family"]],
+         alternative[["date", "currency", "signal_family"]]],
+        ignore_index=True,
+    ).drop_duplicates()
+    start = CALENDAR_TEST_START
+    _, _, end = evaluate_signal_stream_across_horizons(
+        immediate, prices, start, HORIZONS
+    )
+    pairs = match_delayed_hard_confirmations(
+        immediate, hard, prices, start, end, max_wait_observations=5
+    )
+    confirmed_stream = pairs.loc[
+        pairs["confirmed"], ["slow_date", "currency", "slow_observation_index"]
+    ].rename(
+        columns={"slow_date": "date", "slow_observation_index": "observation_index"}
+    )
+    immediate_metrics, immediate_summary, _ = evaluate_signal_stream_across_horizons(
+        immediate, prices, start, HORIZONS
+    )
+    confirmed_metrics, confirmed_summary, _ = evaluate_signal_stream_across_horizons(
+        confirmed_stream, prices, start, HORIZONS
+    )
+    comparison = immediate_metrics.merge(
+        confirmed_metrics,
+        on=["currency", "horizon"],
+        suffixes=("_immediate", "_confirmed"),
+        validate="one_to_one",
+    )
+    comparison["lift_change"] = (
+        comparison["truth_now_lift_confirmed"]
+        - comparison["truth_now_lift_immediate"]
+    )
+    comparison["benefit_change_bps"] = (
+        comparison["benefit_bps_confirmed"] - comparison["benefit_bps_immediate"]
+    )
+    comparison["frequency_change"] = (
+        comparison["signals_per_week_confirmed"]
+        - comparison["signals_per_week_immediate"]
+    )
+    summary = waiting_cost_summary(pairs, start, end)
+    pairs.to_csv(ml_dir / "waiting_cost_pairs.csv", index=False)
+    summary.to_csv(ml_dir / "waiting_cost_summary.csv", index=False)
+    comparison.to_csv(ml_dir / "waiting_policy_comparison.csv", index=False)
+    pd.concat(
+        [immediate_summary.assign(policy="send_immediately"),
+         confirmed_summary.assign(policy="wait_for_hard_confirmation")],
+        ignore_index=True,
+    ).to_csv(ml_dir / "waiting_policy_horizon_summary.csv", index=False)
+    metadata = {
+        "fast_policy": "sent ML signal after communication limits",
+        "slow_policy": "first unused causal OOT momentum/level/corridor-down confirmation",
+        "max_wait_observations": 5,
+        "matching": "chronological, within corridor, one hard confirmation per ML episode",
+        "waiting_cost_bps": "(slow rub_per_unit / fast rub_per_unit - 1) * 10000; positive is client cost",
+        "reporting_window": [str(start.date()), str((end - timedelta(days=1)).date())],
+        "no_test_set_tuning": True,
+    }
+    (ml_dir / "waiting_cost_policy.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+    )
+    print(f"Saved waiting-cost analysis to {ml_dir}", flush=True)
+
+
 def run_cross_h_multi_evaluation(root: Path) -> None:
     """Re-evaluate saved frozen OOT signal dates without fitting any model."""
     output_dir = root / "data/processed/ml_cross_h_11_to_10"
@@ -3763,10 +4022,987 @@ def run_cross_h_multi_evaluation(root: Path) -> None:
     )
 
 
-def cross_h_signals_as_of_date(
+CALENDAR_DEVELOPMENT_START = pd.Timestamp("2023-01-01")
+CALENDAR_TEST_START = pd.Timestamp("2025-01-01")
+CALENDAR_ANCHOR_DAYS = (5, 20)
+
+
+def expected_calendar_anchors(
+    start: pd.Timestamp, end: pd.Timestamp, radius_days: int
+) -> pd.DataFrame:
+    """All deterministic 5/20 anchors whose full +/- window is observable."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    rows = []
+    for month in pd.period_range(start.to_period("M"), (end - timedelta(days=1)).to_period("M"), freq="M"):
+        for day in CALENDAR_ANCHOR_DAYS:
+            anchor = pd.Timestamp(year=month.year, month=month.month, day=day)
+            if (
+                anchor - timedelta(days=int(radius_days)) >= start
+                and anchor + timedelta(days=int(radius_days)) < end
+            ):
+                rows.append({"calendar_anchor": anchor, "anchor_day": day})
+    return pd.DataFrame(rows)
+
+
+def calendar_anchor_candidates(
+    features: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    radius_days: int,
+) -> pd.DataFrame:
+    """Attach dates in a completed +/- radius window to their 5/20 anchor.
+
+    The returned rows contain only causal features.  Future outcomes are never
+    used to decide which date is selected.  Anchors whose complete calendar
+    window is outside [start, end) are deliberately excluded.
+    """
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    complete = expected_calendar_anchors(start, end, radius_days)[
+        "calendar_anchor"
+    ].tolist()
+    parts: list[pd.DataFrame] = []
+    target = features.loc[features["currency"].isin(TARGET_CURRENCIES)]
+    for anchor in complete:
+        window = target.loc[
+            target["date"].between(
+                anchor - timedelta(days=int(radius_days)),
+                anchor + timedelta(days=int(radius_days)),
+            )
+        ].copy()
+        if not window.empty:
+            window["calendar_anchor"] = anchor
+            window["anchor_day"] = anchor.day
+            window["days_from_anchor"] = (window["date"] - anchor).dt.days
+            parts.append(window)
+    return pd.concat(parts, ignore_index=True) if parts else target.iloc[0:0].copy()
+
+
+def calendar_attractive_mask(
+    frame: pd.DataFrame,
+    lookback: int,
+    quantile: float,
+    confirmation: str,
+) -> pd.Series:
+    """Causal market-attractiveness rule used inside calendar windows."""
+    level = frame[f"level_percentile_{lookback}"].ge(quantile)
+    if confirmation == "level_only":
+        return level.fillna(False)
+    if confirmation == "falling":
+        return (level & frame["return_lag_0"].le(0)).fillna(False)
+    if confirmation == "near_min":
+        return (level & frame["distance_to_min_20_bps"].le(25)).fillna(False)
+    if confirmation == "falling_or_turn":
+        return (
+            level
+            & (frame["return_lag_0"].le(0) | frame["reversal_after_fall"].gt(0))
+        ).fillna(False)
+    raise ValueError(f"Unknown calendar confirmation: {confirmation}")
+
+
+def select_calendar_signals(
+    candidates: pd.DataFrame,
+    lookback: int,
+    quantile: float,
+    confirmation: str,
+    mandatory: bool,
+) -> pd.DataFrame:
+    """Sequentially choose at most one date per currency/5-or-20 window.
+
+    In quality-only mode the first qualifying published date in the complete
+    +/- window is emitted.  In mandatory mode we search from anchor-radius up
+    to the anchor; if nothing qualifies, the first publication on/after the
+    anchor is emitted as an explicit fallback.  That fallback is causal: on
+    its date all failed earlier checks and the calendar deadline are known.
+    """
+    frame = candidates.copy()
+    frame["attractive"] = calendar_attractive_mask(
+        frame, lookback, quantile, confirmation
+    )
+    selected: list[pd.DataFrame] = []
+    keys = ["currency", "calendar_anchor"]
+    for _, group in frame.sort_values([*keys, "date"]).groupby(keys, sort=True):
+        if mandatory:
+            eligible = group.loc[group["date"].le(group["calendar_anchor"].iloc[0])]
+        else:
+            eligible = group
+        qualified = eligible.loc[eligible["attractive"]]
+        if not qualified.empty:
+            row = qualified.iloc[[0]].copy()
+            row["calendar_fallback"] = False
+        elif mandatory:
+            after = group.loc[group["date"].ge(group["calendar_anchor"].iloc[0])]
+            if after.empty:
+                continue
+            row = after.iloc[[0]].copy()
+            row["calendar_fallback"] = True
+        else:
+            continue
+        selected.append(row)
+    if not selected:
+        empty = frame.iloc[0:0].copy()
+        empty["calendar_fallback"] = pd.Series(dtype=bool)
+        return empty
+    result = pd.concat(selected, ignore_index=True)
+    result["signal_source"] = np.where(
+        result["calendar_fallback"], "calendar_fallback", "calendar_attractive"
+    )
+    result["message_fact"] = result.apply(
+        lambda row: (
+            f"курс выгоднее {int(round(row[f'level_percentile_{lookback}'] * 100))}% "
+            f"предыдущих {lookback} публикаций"
+            if not row["calendar_fallback"]
+            else f"плановая дата перевода около {int(row['anchor_day'])}-го числа"
+        ),
+        axis=1,
+    )
+    return result.sort_values(["date", "currency"])
+
+
+def combine_calendar_with_ml(
+    ml_signals: pd.DataFrame,
+    calendar_signals: pd.DataFrame,
+    cooldown: int,
+    rolling_days: int = 7,
+    rolling_cap: int = 2,
+) -> pd.DataFrame:
+    """Union streams, then causally thin them to control clustering.
+
+    ML wins ties on the same currency/date.  Afterwards the first eligible
+    event is kept, the next `cooldown` market observations are suppressed, and
+    at most `rolling_cap` pushes may occur in the preceding `rolling_days`.
+    """
+    ml = ml_signals.copy()
+    ml["signal_source"] = "ml"
+    ml["calendar_fallback"] = False
+    combined = pd.concat([ml, calendar_signals], ignore_index=True, sort=False)
+    priority = {"ml": 0, "calendar_attractive": 1, "calendar_fallback": 2}
+    combined["_priority"] = combined["signal_source"].map(priority).fillna(9)
+    combined = (
+        combined.sort_values(["currency", "date", "_priority"])
+        .drop_duplicates(["currency", "date"], keep="first")
+        .drop(columns="_priority")
+    )
+    kept: list[pd.DataFrame] = []
+    for _, group in combined.groupby("currency", sort=True):
+        last_observation = -10**9
+        recent_dates: list[pd.Timestamp] = []
+        positions: list[int] = []
+        group = group.sort_values("date").reset_index(drop=True)
+        for position, row in group.iterrows():
+            date = pd.Timestamp(row["date"])
+            recent_dates = [
+                prior for prior in recent_dates
+                if date - prior < timedelta(days=int(rolling_days))
+            ]
+            if int(row["observation_index"]) - last_observation <= cooldown:
+                continue
+            if len(recent_dates) >= rolling_cap:
+                continue
+            positions.append(position)
+            last_observation = int(row["observation_index"])
+            recent_dates.append(date)
+        kept.append(group.iloc[positions])
+    return pd.concat(kept, ignore_index=True).sort_values(["date", "currency"])
+
+
+def signal_distribution_metrics(
+    signals: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    stream: str,
+) -> pd.DataFrame:
+    """Frequency plus clustering and silence diagnostics per corridor."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    total_weeks = max(1, len(pd.period_range(start, end - timedelta(days=1), freq="W")))
+    end_month_start = end.to_period("M").start_time
+    complete_month_end = end if end == end_month_start else end_month_start
+    complete_months = pd.period_range(
+        start.to_period("M"), complete_month_end - timedelta(days=1), freq="M"
+    )
+    total_months = max(1, len(complete_months))
+    rows: list[dict[str, object]] = []
+    for currency in TARGET_CURRENCIES:
+        group = signals.loc[
+            signals["currency"].eq(currency)
+            & signals["date"].ge(start)
+            & signals["date"].lt(end)
+        ].sort_values("date")
+        gaps_obs = group["observation_index"].diff()
+        gaps_days = group["date"].diff().dt.days
+        weekly = group.assign(week=group["date"].dt.to_period("W")).groupby("week").size()
+        monthly = (
+            group.loc[group["date"].lt(complete_month_end)]
+            .assign(month=lambda data: data["date"].dt.to_period("M"))
+            .groupby("month").size()
+        )
+        rows.append(
+            {
+                "stream": stream,
+                "currency": currency,
+                "signal_count": len(group),
+                "signals_per_week": len(group) / weeks_in_period(start, end),
+                "active_week_count": weekly.size,
+                "total_week_count": total_weeks,
+                "active_week_share": weekly.size / total_weeks,
+                "empty_week_share": 1 - weekly.size / total_weeks,
+                "active_month_share": monthly.size / total_months,
+                "empty_month_share": 1 - monthly.size / total_months,
+                "share_gap_le_2_observations": gaps_obs.le(2).mean() if len(group) else np.nan,
+                "share_gap_le_5_observations": gaps_obs.le(5).mean() if len(group) else np.nan,
+                "share_gap_le_1_calendar_day": gaps_days.le(1).mean() if len(group) else np.nan,
+                "max_gap_calendar_days": gaps_days.max() if len(group) > 1 else np.nan,
+                "gap_calendar_days_q90": (
+                    gaps_days.dropna().quantile(0.90, interpolation="higher")
+                    if len(group) > 1 else np.nan
+                ),
+                "gap_calendar_days_q95": (
+                    gaps_days.dropna().quantile(0.95, interpolation="higher")
+                    if len(group) > 1 else np.nan
+                ),
+                "gap_calendar_days_q99": (
+                    gaps_days.dropna().quantile(0.99, interpolation="higher")
+                    if len(group) > 1 else np.nan
+                ),
+                "max_pushes_in_week": weekly.max() if len(weekly) else 0,
+                "max_pushes_in_month": monthly.max() if len(monthly) else 0,
+                "weekly_count_cv": (
+                    weekly.reindex(
+                        pd.period_range(start, end - timedelta(days=1), freq="W"),
+                        fill_value=0,
+                    ).std()
+                    / max(weekly.reindex(
+                        pd.period_range(start, end - timedelta(days=1), freq="W"),
+                        fill_value=0,
+                    ).mean(), 1e-12)
+                ),
+                "calendar_share": group["signal_source"].ne("ml").mean() if len(group) else 0.0,
+                "fallback_share": group["calendar_fallback"].fillna(False).mean() if len(group) else 0.0,
+            }
+        )
+    result = pd.DataFrame(rows)
+    # The case does not prescribe numeric clustering cutoffs. These explicit
+    # operational thresholds encode its qualitative requirement: no bursts
+    # followed by silent months. They are reporting rules, never model-selection
+    # targets and never affect lift/benefit.
+    result["clustering_pass_operational"] = (
+        result["active_week_share"].ge(0.50)
+        & result["empty_month_share"].eq(0)
+        & result["max_gap_calendar_days"].le(31)
+        & result["share_gap_le_2_observations"].le(0.50)
+        & result["weekly_count_cv"].le(1.10)
+    )
+    return result
+
+
+def _fast_calendar_metrics(
+    signals: pd.DataFrame,
+    labels_by_horizon: dict[int, pd.DataFrame],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[str, float]:
+    """Cheap development metrics; final inference is calculated separately."""
+    result: dict[str, float] = {}
+    for horizon, labels in labels_by_horizon.items():
+        sample = signals.merge(
+            labels[["date", "currency", "truth_now", "benefit_bps", "valid"]],
+            on=["date", "currency"], how="inner", validate="one_to_one",
+        )
+        sample = sample.loc[
+            sample["valid"] & sample["date"].ge(start) & sample["date"].lt(end)
+        ]
+        pool = labels.loc[
+            labels["valid"] & labels["date"].ge(start) & labels["date"].lt(end)
+        ]
+        cells = []
+        for currency in TARGET_CURRENCIES:
+            chosen = sample.loc[sample["currency"].eq(currency)]
+            random_rate = pool.loc[pool["currency"].eq(currency), "truth_now"].mean()
+            cells.append(
+                (
+                    chosen["truth_now"].mean() / random_rate if len(chosen) and random_rate else np.nan,
+                    chosen["benefit_bps"].mean() if len(chosen) else np.nan,
+                )
+            )
+        result[f"min_lift_h{horizon}"] = float(np.nanmin([cell[0] for cell in cells]))
+        result[f"min_benefit_h{horizon}"] = float(np.nanmin([cell[1] for cell in cells]))
+    distribution = signal_distribution_metrics(signals, start, end, "development")
+    result["median_signals_per_week"] = float(distribution["signals_per_week"].median())
+    result["median_empty_week_share"] = float(distribution["empty_week_share"].median())
+    result["max_cluster_share_2"] = float(distribution["share_gap_le_2_observations"].max())
+    return result
+
+
+def run_calendar_augmentation(root: Path) -> None:
+    """Select calendar policies pre-2025 and evaluate them on 2025-2026."""
+    output_dir = root / "data/processed/ml_cross_h_11_to_10"
+    signal_path = output_dir / "signals_backtest.csv.gz"
+    if not signal_path.exists():
+        raise FileNotFoundError(
+            f"Run --experiment cross-h-reproduction first: missing {signal_path}"
+        )
+    print("Calendar augmentation: loading frozen OOT ML stream", flush=True)
+    ml = pd.read_csv(signal_path, parse_dates=["date"])
+    prices = load_ml_prices(latest_default_input())
+    features = build_features(prices)
+    labels_by_horizon = {h: build_labels(prices, h) for h in HORIZONS}
+    maturity = [
+        labels.loc[labels["valid"]].groupby("currency")["date"].max().min()
+        for labels in labels_by_horizon.values()
+    ]
+    common_end = pd.Timestamp(min(maturity)) + timedelta(days=1)
+    ml_keys = ml.drop(
+        columns=[
+            "truth_now", "local_min", "benefit_bps", "future_regret_bps",
+            "label_available_date", "valid", "message_fact",
+        ],
+        errors="ignore",
+    ).merge(
+        features[["date", "currency", "observation_index"]],
+        on=["date", "currency"], how="left", suffixes=("", "_feature"),
+    )
+    if "observation_index_feature" in ml_keys:
+        ml_keys["observation_index"] = ml_keys["observation_index"].fillna(
+            ml_keys.pop("observation_index_feature")
+        )
+
+    print("Calendar augmentation: pre-2025 policy grid", flush=True)
+    development_labels = {h: labels_by_horizon[h] for h in (5, 10)}
+    grid_rows: list[dict[str, object]] = []
+    for radius in (2, 3):
+        candidates = calendar_anchor_candidates(
+            features, CALENDAR_DEVELOPMENT_START, CALENDAR_TEST_START, radius
+        )
+        for lookback in (20, 60, 120):
+            for quantile in (0.60, 0.70, 0.80, 0.90):
+                for confirmation in ("level_only", "falling", "near_min", "falling_or_turn"):
+                    for mandatory in (False, True):
+                        calendar = select_calendar_signals(
+                            candidates, lookback, quantile, confirmation, mandatory
+                        )
+                        for cooldown in (0, 1, 2, 3):
+                            combined = combine_calendar_with_ml(
+                                ml_keys.loc[
+                                    ml_keys["date"].ge(CALENDAR_DEVELOPMENT_START)
+                                    & ml_keys["date"].lt(CALENDAR_TEST_START)
+                                ],
+                                calendar,
+                                cooldown,
+                            )
+                            metrics = _fast_calendar_metrics(
+                                combined,
+                                development_labels,
+                                CALENDAR_DEVELOPMENT_START,
+                                CALENDAR_TEST_START,
+                            )
+                            grid_rows.append(
+                                {
+                                    "radius_days": radius,
+                                    "lookback": lookback,
+                                    "level_quantile": quantile,
+                                    "confirmation": confirmation,
+                                    "mandatory": mandatory,
+                                    "cooldown": cooldown,
+                                    **metrics,
+                                }
+                            )
+    grid = pd.DataFrame(grid_rows)
+    # Freeze one global rule for each product mode.  Stability takes precedence:
+    # maximise the worse h=5/h=10 lift, then economic floor and coverage.
+    grid["selection_lift"] = grid[["min_lift_h5", "min_lift_h10"]].min(axis=1)
+    grid["selection_benefit"] = grid[["min_benefit_h5", "min_benefit_h10"]].min(axis=1)
+    feasible = grid.loc[
+        grid["median_signals_per_week"].between(1.0, 2.0)
+        & grid["selection_benefit"].ge(0)
+    ].copy()
+    selections: list[pd.Series] = []
+    for mandatory in (False, True):
+        mode = feasible.loc[feasible["mandatory"].eq(mandatory)]
+        if mode.empty:
+            mode = grid.loc[grid["mandatory"].eq(mandatory)]
+        selections.append(
+            mode.sort_values(
+                ["selection_lift", "selection_benefit", "median_empty_week_share", "max_cluster_share_2"],
+                ascending=[False, False, True, True],
+            ).iloc[0]
+        )
+    coverage_pool = grid.loc[
+        grid["mandatory"] & grid["selection_benefit"].ge(0)
+    ]
+    selections.append(
+        coverage_pool.sort_values(
+            ["median_signals_per_week", "selection_lift", "selection_benefit"],
+            ascending=[False, False, False],
+        ).iloc[0]
+    )
+    selected_policies = pd.DataFrame(selections).reset_index(drop=True)
+    selected_policies["stream"] = [
+        "ML + attractive calendar",
+        "ML + mandatory calendar",
+        "ML + calendar coverage",
+    ]
+    selected_policies["selection_role"] = [
+        "quality_first", "quality_first", "coverage_first"
+    ]
+    selected_policies["frequency_constraint_met"] = selected_policies[
+        "median_signals_per_week"
+    ].between(1.0, 2.0)
+    grid.to_csv(output_dir / "calendar_policy_grid.csv", index=False)
+    selected_policies.to_csv(output_dir / "calendar_selected_policies.csv", index=False)
+
+    print("Calendar augmentation: frozen 2025-2026 evaluation", flush=True)
+    final_candidates = {
+        radius: calendar_anchor_candidates(
+            features, CALENDAR_TEST_START, common_end, radius
+        )
+        for radius in selected_policies["radius_days"].astype(int).unique()
+    }
+    final_streams: dict[str, pd.DataFrame] = {
+        "ML raw": ml_keys.loc[
+            ml_keys["date"].ge(CALENDAR_TEST_START) & ml_keys["date"].lt(common_end)
+        ].copy()
+    }
+    final_streams["ML raw"]["signal_source"] = "ml"
+    final_streams["ML raw"]["calendar_fallback"] = False
+    # A fixed anti-clustering baseline makes the impact of calendar additions clear.
+    final_streams["ML thinned"] = combine_calendar_with_ml(
+        final_streams["ML raw"], features.iloc[0:0].copy(), cooldown=2
+    )
+    for _, policy in selected_policies.iterrows():
+        calendar = select_calendar_signals(
+            final_candidates[int(policy["radius_days"])],
+            int(policy["lookback"]),
+            float(policy["level_quantile"]),
+            str(policy["confirmation"]),
+            bool(policy["mandatory"]),
+        )
+        final_streams[str(policy["stream"])] = combine_calendar_with_ml(
+            final_streams["ML raw"], calendar, int(policy["cooldown"])
+        )
+
+    metric_parts: list[pd.DataFrame] = []
+    summary_parts: list[pd.DataFrame] = []
+    distribution_parts: list[pd.DataFrame] = []
+    signal_parts: list[pd.DataFrame] = []
+    for name, stream in final_streams.items():
+        metrics, summary, _ = evaluate_signal_stream_across_horizons(
+            stream, prices, CALENDAR_TEST_START, HORIZONS
+        )
+        metrics.insert(0, "stream", name)
+        summary.insert(0, "stream", name)
+        metric_parts.append(metrics)
+        summary_parts.append(summary)
+        distribution_parts.append(
+            signal_distribution_metrics(stream, CALENDAR_TEST_START, common_end, name)
+        )
+        exported = stream.copy()
+        exported.insert(0, "stream", name)
+        signal_parts.append(exported)
+    pd.concat(metric_parts, ignore_index=True).to_csv(
+        output_dir / "calendar_final_by_horizon.csv", index=False
+    )
+    pd.concat(summary_parts, ignore_index=True).to_csv(
+        output_dir / "calendar_final_summary.csv", index=False
+    )
+    pd.concat(distribution_parts, ignore_index=True).to_csv(
+        output_dir / "calendar_distribution.csv", index=False
+    )
+    pd.concat(signal_parts, ignore_index=True).to_csv(
+        output_dir / "calendar_signals_backtest.csv.gz", index=False
+    )
+    print(
+        f"Saved causal calendar analysis through {(common_end - timedelta(days=1)).date()} "
+        f"to {output_dir}",
+        flush=True,
+    )
+
+
+def mark_recent_ml_signal(
+    candidates: pd.DataFrame,
+    ml_signals: pd.DataFrame,
+    observations: int = 2,
+) -> pd.DataFrame:
+    """Mark whether an ML push is already known on T or the prior observations."""
+    result = candidates.copy()
+    result["recent_ml_signal"] = False
+    for currency, group in result.groupby("currency", sort=True):
+        ml_indices = np.sort(
+            ml_signals.loc[
+                ml_signals["currency"].eq(currency), "observation_index"
+            ].dropna().astype(int).unique()
+        )
+        if not len(ml_indices):
+            continue
+        current = group["observation_index"].astype(int).to_numpy()
+        right = np.searchsorted(ml_indices, current, side="right") - 1
+        has_previous = right >= 0
+        previous = np.where(has_previous, ml_indices[np.maximum(right, 0)], -10**9)
+        result.loc[group.index, "recent_ml_signal"] = (
+            has_previous & ((current - previous) <= observations)
+        )
+    return result
+
+
+def select_mandatory_reminders(
+    candidates: pd.DataFrame,
+    ml_signals: pd.DataFrame,
+    lookback: int = 20,
+    quantile: float = 0.80,
+    avoid_recent_ml_observations: int = 2,
+) -> pd.DataFrame:
+    """Choose one causal CRM reminder for every completed 5/20 window.
+
+    Before the anchor, the first attractive date without a recent ML message is
+    preferred.  If none exists, the first publication on/after the anchor is a
+    mandatory reminder.  The reminder never claims that the rate will improve.
+    """
+    frame = mark_recent_ml_signal(
+        candidates, ml_signals, avoid_recent_ml_observations
+    )
+    frame["attractive"] = calendar_attractive_mask(
+        frame, lookback, quantile, "level_only"
+    )
+    rows: list[pd.DataFrame] = []
+    for _, group in frame.sort_values(
+        ["currency", "calendar_anchor", "date"]
+    ).groupby(["currency", "calendar_anchor"], sort=True):
+        anchor = pd.Timestamp(group["calendar_anchor"].iloc[0])
+        preferred = group.loc[
+            group["date"].le(anchor)
+            & group["attractive"]
+            & ~group["recent_ml_signal"]
+        ]
+        if not preferred.empty:
+            row = preferred.iloc[[0]].copy()
+            row["reminder_fallback"] = False
+        else:
+            fallback = group.loc[group["date"].ge(anchor)]
+            if fallback.empty:
+                # A completed +/-3 window normally contains a CBR publication;
+                # keeping this explicit protects against unexpected data holes.
+                continue
+            row = fallback.iloc[[0]].copy()
+            row["reminder_fallback"] = True
+        rows.append(row)
+    if not rows:
+        empty = frame.iloc[0:0].copy()
+        empty["reminder_fallback"] = pd.Series(dtype=bool)
+        return empty
+    reminders = pd.concat(rows, ignore_index=True)
+    reminders["signal_source"] = "calendar_reminder"
+    reminders["message_fact"] = reminders.apply(
+        lambda row: (
+            f"Напоминание о переводе: курс ниже, чем в "
+            f"{int(round(row[f'level_percentile_{lookback}'] * 100))}% "
+            f"предыдущих {lookback} публикаций; сумма и реквизиты заполнены"
+            if not row["reminder_fallback"]
+            else f"Плановый перевод около {int(row['anchor_day'])}-го числа: "
+            "сумма и реквизиты уже заполнены"
+        ),
+        axis=1,
+    )
+    return reminders.sort_values(["date", "currency"])
+
+
+def fill_missing_calendar_reminders(
+    reminders: pd.DataFrame,
+    features: pd.DataFrame,
+    expected_anchors: pd.DataFrame,
+) -> pd.DataFrame:
+    """Emit a calendar-day fallback when no CBR publication exists in a window."""
+    expected = pd.MultiIndex.from_product(
+        [TARGET_CURRENCIES, expected_anchors["calendar_anchor"]],
+        names=["currency", "calendar_anchor"],
+    )
+    actual = pd.MultiIndex.from_frame(
+        reminders[["currency", "calendar_anchor"]]
+    )
+    missing = expected.difference(actual)
+    rows: list[pd.DataFrame] = []
+    for currency, anchor in missing:
+        history = features.loc[
+            features["currency"].eq(currency) & features["date"].le(anchor)
+        ].sort_values("date")
+        if history.empty:
+            raise RuntimeError(f"No known rate for {currency} by {anchor.date()}")
+        row = history.iloc[[-1]].copy()
+        row["date"] = anchor
+        row["calendar_anchor"] = anchor
+        row["anchor_day"] = anchor.day
+        row["days_from_anchor"] = 0
+        row["attractive"] = False
+        row["recent_ml_signal"] = False
+        row["reminder_fallback"] = True
+        row["signal_source"] = "calendar_reminder"
+        row["message_fact"] = (
+            f"Плановый перевод около {anchor.day}-го числа: "
+            "сумма и реквизиты уже заполнены"
+        )
+        rows.append(row)
+    if rows:
+        reminders = pd.concat([reminders, *rows], ignore_index=True, sort=False)
+    return reminders.sort_values(["date", "currency"]).reset_index(drop=True)
+
+
+def union_ml_and_reminders(
+    ml_signals: pd.DataFrame, reminders: pd.DataFrame
+) -> pd.DataFrame:
+    """Deduplicate same-day ML and CRM messages without suppressing either event."""
+    ml = ml_signals.copy()
+    ml["signal_source"] = "ml"
+    reminder_columns = [
+        "date", "currency", "observation_index", "calendar_anchor", "anchor_day", "days_from_anchor",
+        "reminder_fallback", "attractive", "recent_ml_signal", "message_fact",
+    ]
+    reminder_info = reminders[reminder_columns].rename(
+        columns={"message_fact": "reminder_message"}
+    )
+    combined = ml.merge(
+        reminder_info, on=["date", "currency"], how="outer", indicator=True,
+        suffixes=("", "_reminder"), validate="one_to_one",
+    )
+    combined["signal_source"] = combined["_merge"].map(
+        {"left_only": "ml", "right_only": "calendar_reminder", "both": "ml+reminder"}
+    ).astype("object")
+    if "observation_index_reminder" in combined:
+        combined["observation_index"] = combined["observation_index"].fillna(
+            combined.pop("observation_index_reminder")
+        )
+    combined = combined.drop(columns="_merge")
+    return combined.sort_values(["date", "currency"]).reset_index(drop=True)
+
+
+def apply_weekly_push_cap(frame: pd.DataFrame, max_pushes: int = 2) -> pd.DataFrame:
+    """Causally keep at most the first `max_pushes` communications Mon-Sun."""
+    if max_pushes < 1:
+        raise ValueError("max_pushes must be positive")
+    result = frame.sort_values(["currency", "date"]).copy()
+    result["_calendar_week"] = result["date"].dt.to_period("W-SUN")
+    result["_position_in_week"] = result.groupby(
+        ["currency", "_calendar_week"], sort=False
+    ).cumcount()
+    result = result.loc[result["_position_in_week"].lt(max_pushes)].drop(
+        columns=["_calendar_week", "_position_in_week"]
+    )
+    return result.sort_values(["date", "currency"]).reset_index(drop=True)
+
+
+def apply_ml_communication_limits(
+    frame: pd.DataFrame,
+    max_pushes_per_week: int = 2,
+    min_gap_calendar_days: int = 1,
+) -> pd.DataFrame:
+    """Causally enforce both a weekly cap and no adjacent-day ML pushes.
+
+    `min_gap_calendar_days=1` means that after a kept signal on T, another ML
+    signal may be sent no earlier than T+2 calendar days. Rejected candidates
+    do not consume the weekly quota, so a later valid signal can still be sent.
+    """
+    if max_pushes_per_week < 1 or min_gap_calendar_days < 0:
+        raise ValueError("Communication limits must be non-negative and non-zero")
+    kept: list[pd.DataFrame] = []
+    for _, group in frame.sort_values(["currency", "date"]).groupby(
+        "currency", sort=True
+    ):
+        weekly_counts: dict[pd.Period, int] = {}
+        last_sent: pd.Timestamp | None = None
+        positions: list[int] = []
+        group = group.reset_index(drop=True)
+        for position, row in group.iterrows():
+            date = pd.Timestamp(row["date"])
+            week = date.to_period("W-SUN")
+            if (
+                last_sent is not None
+                and (date - last_sent).days <= min_gap_calendar_days
+            ):
+                continue
+            if weekly_counts.get(week, 0) >= max_pushes_per_week:
+                continue
+            positions.append(position)
+            weekly_counts[week] = weekly_counts.get(week, 0) + 1
+            last_sent = date
+        kept.append(group.iloc[positions])
+    return (
+        pd.concat(kept, ignore_index=True).sort_values(["date", "currency"])
+        if kept else frame.iloc[0:0].copy()
+    )
+
+
+def reminders_for_uncovered_anchors(
+    features: pd.DataFrame,
+    sent_ml: pd.DataFrame,
+    anchors: pd.DataFrame,
+    radius_days: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Schedule anchor+radius reminders only when no sent ML exists in +/-radius.
+
+    Waiting until the right edge is deliberate: only then can the decision use
+    the fact that no ML signal occurred anywhere in the symmetric window
+    without looking into the future.
+    """
+    reminder_rows: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, object]] = []
+    for currency in TARGET_CURRENCIES:
+        currency_ml = sent_ml.loc[sent_ml["currency"].eq(currency)]
+        currency_features = features.loc[features["currency"].eq(currency)].sort_values("date")
+        for anchor in anchors["calendar_anchor"]:
+            left = anchor - timedelta(days=radius_days)
+            right = anchor + timedelta(days=radius_days)
+            covered = currency_ml["date"].between(left, right).any()
+            audit_rows.append(
+                {
+                    "currency": currency,
+                    "calendar_anchor": anchor,
+                    "covered_by_ml": bool(covered),
+                    "reminder_candidate": not bool(covered),
+                }
+            )
+            if covered:
+                continue
+            history = currency_features.loc[currency_features["date"].le(right)]
+            if history.empty:
+                raise RuntimeError(f"No known rate for {currency} by {right.date()}")
+            row = history.iloc[[-1]].copy()
+            # CRM messages may be sent on a non-publication day.  The copied
+            # observation_index identifies the last rate known by that date.
+            row["date"] = right
+            row["calendar_anchor"] = anchor
+            row["anchor_day"] = anchor.day
+            row["days_from_anchor"] = radius_days
+            row["attractive"] = row["level_percentile_20"].ge(0.80)
+            row["recent_ml_signal"] = False
+            row["signal_source"] = "calendar_reminder"
+            row["reminder_fallback"] = ~row["attractive"]
+            row["message_fact"] = row.apply(
+                lambda item: (
+                    f"Напоминание о переводе около {anchor.day}-го: курс ниже, "
+                    f"чем в {int(round(item['level_percentile_20'] * 100))}% "
+                    "предыдущих 20 публикаций; сумма и реквизиты заполнены"
+                    if bool(item["attractive"])
+                    else f"Плановый перевод около {anchor.day}-го числа: "
+                    "сумма и реквизиты уже заполнены"
+                ),
+                axis=1,
+            )
+            reminder_rows.append(row)
+    reminders = (
+        pd.concat(reminder_rows, ignore_index=True, sort=False)
+        if reminder_rows else features.iloc[0:0].copy()
+    )
+    return reminders.sort_values(["date", "currency"]), pd.DataFrame(audit_rows)
+
+
+def unconditional_anchor_reminders(
+    features: pd.DataFrame,
+    anchors: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create one non-financial CRM reminder exactly on every 5/20 anchor."""
+    rows: list[pd.DataFrame] = []
+    for currency in TARGET_CURRENCIES:
+        history = features.loc[features["currency"].eq(currency)].sort_values("date")
+        for anchor in anchors["calendar_anchor"]:
+            known = history.loc[history["date"].le(anchor)]
+            if known.empty:
+                raise RuntimeError(f"No known rate for {currency} by {anchor.date()}")
+            row = known.iloc[[-1]].copy()
+            row["date"] = anchor
+            row["calendar_anchor"] = anchor
+            row["anchor_day"] = anchor.day
+            row["days_from_anchor"] = 0
+            row["attractive"] = row["level_percentile_20"].ge(0.80)
+            row["recent_ml_signal"] = False
+            row["reminder_fallback"] = ~row["attractive"]
+            row["signal_source"] = "calendar_reminder"
+            row["message_fact"] = row.apply(
+                lambda item: (
+                    f"Напоминание о переводе на {anchor.day}-е число: курс ниже, "
+                    f"чем в {int(round(item['level_percentile_20'] * 100))}% "
+                    "предыдущих 20 публикаций; сумма и реквизиты заполнены"
+                    if bool(item["attractive"])
+                    else f"Плановый перевод на {anchor.day}-е число: "
+                    "сумма и реквизиты уже заполнены"
+                ),
+                axis=1,
+            )
+            rows.append(row)
+    return pd.concat(rows, ignore_index=True, sort=False).sort_values(
+        ["date", "currency"]
+    )
+
+
+def run_calendar_reminders(root: Path) -> None:
+    """Enforce max two weekly pushes and add non-financial 5/20 reminders."""
+    output_dir = root / "data/processed/ml_cross_h_11_to_10"
+    signal_path = output_dir / "signals_backtest.csv.gz"
+    if not signal_path.exists():
+        raise FileNotFoundError(
+            f"Run --experiment cross-h-reproduction first: missing {signal_path}"
+        )
+    prices = load_ml_prices(latest_default_input())
+    features = build_features(prices)
+    ml = pd.read_csv(signal_path, parse_dates=["date"])
+    ml_keys = ml.drop(
+        columns=[
+            "truth_now", "local_min", "benefit_bps", "future_regret_bps",
+            "label_available_date", "valid", "message_fact",
+        ], errors="ignore",
+    )
+    # Use the same h=20 maturity boundary as the financial ML report so all
+    # displayed 2025-2026 periods are directly comparable.
+    labels_h20 = build_labels(prices, max(HORIZONS))
+    common_end = (
+        labels_h20.loc[labels_h20["valid"]]
+        .groupby("currency")["date"].max().min()
+        + timedelta(days=1)
+    )
+    start = CALENDAR_TEST_START
+    ml_window = ml_keys.loc[
+        ml_keys["date"].ge(start) & ml_keys["date"].lt(common_end)
+    ].copy()
+    raw_ml = ml_window.assign(signal_source="ml")
+    # First remove ML bursts. This preliminary stream is also the only stream
+    # allowed to cover an anchor and suppress its reminder.
+    weekly_capped_ml = apply_weekly_push_cap(raw_ml, max_pushes=2)
+    capped_ml = apply_ml_communication_limits(
+        raw_ml, max_pushes_per_week=2, min_gap_calendar_days=1
+    )
+    expected_anchor_dates = expected_calendar_anchors(start, common_end, radius_days=3)
+    strict_reminders, anchor_audit = reminders_for_uncovered_anchors(
+        features, capped_ml, expected_anchor_dates, radius_days=3
+    )
+    strict_candidates = union_ml_and_reminders(capped_ml, strict_reminders)
+    strict_combined = apply_weekly_push_cap(strict_candidates, max_pushes=2)
+    emitted_reminder_keys = strict_combined.loc[
+        strict_combined["signal_source"].isin(["calendar_reminder", "ml+reminder"]),
+        ["currency", "calendar_anchor"],
+    ].dropna().drop_duplicates()
+    anchor_audit = anchor_audit.merge(
+        emitted_reminder_keys.assign(reminder_emitted=True),
+        on=["currency", "calendar_anchor"], how="left",
+    )
+    anchor_audit["reminder_emitted"] = anchor_audit["reminder_emitted"].fillna(False)
+    anchor_audit["covered_after_policy"] = (
+        anchor_audit["covered_by_ml"] | anchor_audit["reminder_emitted"]
+    )
+
+    # Requested alternative: cap only ML, then ALWAYS add separate reminders
+    # exactly on every 5th and 20th.  They are not cancelled by nearby/same-day
+    # ML and there is deliberately no cap on the combined communication stream.
+    exact_anchor_dates = expected_calendar_anchors(
+        start, common_end, radius_days=0
+    )
+    reminders = unconditional_anchor_reminders(features, exact_anchor_dates)
+    combined = pd.concat([capped_ml, reminders], ignore_index=True, sort=False).sort_values(
+        ["date", "currency", "signal_source"]
+    ).reset_index(drop=True)
+
+    distribution = pd.concat(
+        [
+            signal_distribution_metrics(
+                raw_ml.assign(calendar_fallback=False), start, common_end, "ML raw",
+            ),
+            signal_distribution_metrics(
+                weekly_capped_ml.assign(calendar_fallback=False),
+                start, common_end, "ML weekly cap",
+            ),
+            signal_distribution_metrics(
+                capped_ml.assign(calendar_fallback=False),
+                start, common_end, "ML weekly cap + day gap",
+            ),
+            signal_distribution_metrics(
+                strict_combined.assign(
+                    calendar_fallback=strict_combined["reminder_fallback"].fillna(False)
+                ),
+                start, common_end, "Strict total cap",
+            ),
+            signal_distribution_metrics(
+                combined.assign(
+                    calendar_fallback=combined["reminder_fallback"].fillna(False)
+                ),
+                start, common_end, "ML cap + mandatory 5/20",
+            ),
+        ],
+        ignore_index=True,
+    )
+    strict_coverage_summary = anchor_audit.groupby("currency", as_index=False).agg(
+        anchors=("calendar_anchor", "size"),
+        covered_by_ml=("covered_by_ml", "sum"),
+        reminder_candidates=("reminder_candidate", "sum"),
+        reminders_emitted=("reminder_emitted", "sum"),
+        anchors_covered_after_policy=("covered_after_policy", "sum"),
+    )
+    strict_coverage_summary["anchor_coverage"] = (
+        strict_coverage_summary["anchors_covered_after_policy"]
+        / strict_coverage_summary["anchors"]
+    )
+    coverage_summary = reminders.groupby("currency", as_index=False).agg(
+        anchors=("calendar_anchor", "nunique"),
+        reminders_emitted=("calendar_anchor", "size"),
+        attractive_reminders=("reminder_fallback", lambda values: int((~values).sum())),
+    )
+    coverage_summary["anchor_coverage"] = 1.0
+
+    financial_metrics, financial_summary, _ = evaluate_signal_stream_across_horizons(
+        capped_ml, prices, start, HORIZONS
+    )
+    total_frequency = distribution.loc[
+        distribution["stream"].eq("ML cap + mandatory 5/20"), "signals_per_week"
+    ]
+    financial_summary["median_ml_pushes_per_week"] = financial_summary[
+        "median_signals_per_week"
+    ]
+    financial_summary["mean_ml_pushes_per_week"] = distribution.loc[
+        distribution["stream"].eq("ML weekly cap + day gap"), "signals_per_week"
+    ].mean()
+    financial_summary["mean_total_pushes_per_week"] = total_frequency.mean()
+    financial_summary["min_total_pushes_per_week"] = total_frequency.min()
+    financial_summary["max_total_pushes_per_week"] = total_frequency.max()
+
+    reminder_export_columns = [
+        "date", "currency", "observation_index", "calendar_anchor", "anchor_day",
+        "days_from_anchor", "level_percentile_20", "attractive",
+        "reminder_fallback", "signal_source", "message_fact",
+    ]
+    reminders[reminder_export_columns].to_csv(
+        output_dir / "calendar_reminders.csv", index=False
+    )
+    combined.to_csv(output_dir / "ml_plus_reminders.csv.gz", index=False)
+    distribution.to_csv(output_dir / "reminder_distribution.csv", index=False)
+    coverage_summary.to_csv(output_dir / "reminder_coverage.csv", index=False)
+    anchor_audit.to_csv(output_dir / "reminder_anchor_audit.csv", index=False)
+    strict_coverage_summary.to_csv(
+        output_dir / "strict_reminder_coverage.csv", index=False
+    )
+    strict_combined.to_csv(output_dir / "strict_ml_plus_reminders.csv.gz", index=False)
+    financial_metrics.to_csv(
+        output_dir / "communication_ml_by_horizon.csv", index=False
+    )
+    financial_summary.to_csv(
+        output_dir / "communication_summary_by_horizon.csv", index=False
+    )
+    policy = {
+        "role": "non-financial CRM reminder; excluded from hit/lift/benefit",
+        "anchors": [5, 20],
+        "radius_calendar_days": 0,
+        "ml_limits": "at most two chronological ML pushes per Monday-Sunday week and no ML pushes on adjacent calendar days",
+        "reminder_rule": "one separate CRM reminder exactly on every 5th and 20th; never cancelled by nearby ML; no total-stream cap",
+        "same_day_rule": "same-day ML and reminder remain two separate communications",
+        "strict_control_same_day_rule": "the separate strict-control stream deduplicates same-day ML and reminder",
+        "reporting_window": [str(start.date()), str((common_end - timedelta(days=1)).date())],
+        "financial_metrics_scope": "only ML rows remaining after the ML-only weekly cap",
+    }
+    (output_dir / "reminder_policy.json").write_text(
+        json.dumps(policy, ensure_ascii=False, indent=2) + "\n"
+    )
+    print(
+        f"Saved mandatory reminder analysis through "
+        f"{(common_end - timedelta(days=1)).date()} to {output_dir}", flush=True
+    )
+
+
+def cross_h_ml_candidates_as_of_date(
     prices: pd.DataFrame, as_of: pd.Timestamp
 ) -> pd.DataFrame:
-    """Production-style current signals for the frozen h=11 policy."""
+    """Return all causal ML candidates in the active frozen-policy fold."""
     as_of = pd.Timestamp(as_of).normalize()
     causal_prices = prices.loc[prices["date"].le(as_of)].copy()
     features = build_features(causal_prices)
@@ -3823,10 +5059,7 @@ def cross_h_signals_as_of_date(
     ranked = causal_score_percentiles(
         reference, score_stream, ("p_good_push",), lookback=lookback
     )
-    selected = ranked.loc[
-        ranked["date"].eq(score_date)
-        & ranked["p_good_push_rank"].ge(quantile)
-    ].copy()
+    selected = ranked.loc[ranked["p_good_push_rank"].ge(quantile)].copy()
     if selected.empty:
         return pd.DataFrame(
             columns=[
@@ -3850,8 +5083,255 @@ def cross_h_signals_as_of_date(
         "date", "currency", "train_horizon", "evaluation_horizon", "scenario",
         "direction", "strength", "speed", "p_good_push", "p_good_push_rank",
         "message_fact", "model_config", "score_lookback", "joint_quantile",
+        "observation_index", "return_mean_3", "streak_length",
+        "level_percentile_60",
     ]
     return selected[columns_out].sort_values(["date", "currency"])
+
+
+def cross_h_signals_as_of_date(
+    prices: pd.DataFrame, as_of: pd.Timestamp
+) -> pd.DataFrame:
+    """Return current ML candidates using no observations after ``as_of``."""
+    as_of = pd.Timestamp(as_of).normalize()
+    candidates = cross_h_ml_candidates_as_of_date(prices, as_of)
+    if candidates.empty:
+        return candidates
+    latest = (
+        prices.loc[
+            prices["date"].le(as_of)
+            & prices["currency"].isin(TARGET_CURRENCIES)
+        ]
+        .groupby("currency")["date"]
+        .max()
+        .rename("latest_date")
+    )
+    current = candidates.join(latest, on="currency")
+    return (
+        current.loc[current["date"].eq(current["latest_date"])]
+        .drop(columns="latest_date")
+        .sort_values(["date", "currency"])
+        .reset_index(drop=True)
+    )
+
+
+def _format_rate(value: float) -> str:
+    """Format a normalized RUB-per-unit rate without false precision."""
+    decimals = 4 if value < 1 else 2
+    return f"{value:.{decimals}f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _production_copy_features(
+    candidates: pd.DataFrame, prices: pd.DataFrame
+) -> pd.DataFrame:
+    """Attach causal price and a fixed L20 stable-corridor description."""
+    if candidates.empty:
+        return candidates.copy()
+    parts: list[pd.DataFrame] = []
+    target = prices.loc[prices["currency"].isin(TARGET_CURRENCIES)].copy()
+    for currency, group in target.groupby("currency", sort=True):
+        group = group.sort_values("date")[["date", "currency", "rub_per_unit"]].copy()
+        prior = group["rub_per_unit"].shift(1).rolling(20, min_periods=20)
+        group["prior_low_20"] = prior.min()
+        group["prior_high_20"] = prior.max()
+        group["prior_range_20_bps"] = (
+            group["prior_high_20"] / group["prior_low_20"] - 1
+        ) * 10_000
+        parts.append(group)
+    facts = pd.concat(parts, ignore_index=True)
+    return candidates.merge(facts, on=["date", "currency"], how="left", validate="many_to_one")
+
+
+def render_ml_pushes(
+    candidates: pd.DataFrame, prices: pd.DataFrame
+) -> pd.DataFrame:
+    """Render approved factual copy for already selected ML candidates."""
+    frame = _production_copy_features(candidates, prices)
+    if frame.empty:
+        return pd.DataFrame(columns=PRODUCTION_SIGNAL_COLUMNS)
+
+    rows: list[dict[str, object]] = []
+    for _, row in frame.iterrows():
+        currency = str(row["currency"])
+        copy = CURRENCY_COPY[currency]
+        rate = float(row["rub_per_unit"])
+        percentile = float(row.get("level_percentile_60", np.nan))
+        streak_value = row.get("streak_length", 0)
+        streak = int(streak_value) if pd.notna(streak_value) else 0
+        prior_low = float(row.get("prior_low_20", np.nan))
+        prior_range = float(row.get("prior_range_20_bps", np.nan))
+
+        if np.isfinite(percentile) and percentile >= 0.80:
+            template_id = "ml_low_level"
+            explanation = "low_level"
+            title = f"Курс {copy['genitive']} ниже большинства недавних значений"
+            body = (
+                f"Последний курс ЦБ — {_format_rate(rate)} ₽ за {copy['unit']}. "
+                f"Это ниже, чем в {int(round(percentile * 100))}% из предыдущих "
+                f"60 публикаций. Проверьте условия перевода в {copy['country']}."
+            )
+        elif (
+            np.isfinite(prior_low)
+            and np.isfinite(prior_range)
+            and prior_range <= 400
+            and rate < prior_low
+        ):
+            template_id = "ml_corridor_exit_down"
+            explanation = "corridor_exit_down_L20_R400"
+            exit_pct = (prior_low - rate) / prior_low * 100
+            title = f"Курс {copy['genitive']} вышел ниже недавнего диапазона"
+            body = (
+                f"Последний курс ЦБ на {str(f'{exit_pct:.1f}').replace('.', ',')}% "
+                f"ниже нижней границы диапазона предыдущих 20 публикаций. "
+                f"Проверьте условия перевода в {copy['country']}."
+            )
+        elif streak >= 2:
+            template_id = "ml_momentum_down"
+            explanation = "momentum_down"
+            title = f"Курс {copy['genitive']} снижается"
+            body = (
+                f"По данным ЦБ курс снижался в каждой из последних {streak} "
+                f"публикаций. Проверьте актуальные условия перевода "
+                f"в {copy['country']}."
+            )
+        else:
+            template_id = "ml_neutral_fallback"
+            explanation = "current_rate"
+            title = f"Обновился ориентир по курсу {copy['genitive']}"
+            body = (
+                f"Последний опубликованный курс ЦБ — {_format_rate(rate)} ₽ "
+                f"за {copy['unit']}. Актуальный курс перевода доступен в приложении."
+            )
+
+        rows.append(
+            {
+                "date": pd.Timestamp(row["date"]),
+                "corridor": f"RUB→{currency}",
+                "indicator": "ml_good_push",
+                "direction": "foreign_currency_down_is_better",
+                "strength": float(row["p_good_push_rank"]),
+                # Positive speed means movement in the favourable direction.
+                "speed": (
+                    -float(row["return_mean_3"]) * 10_000
+                    if pd.notna(row["return_mean_3"])
+                    else np.nan
+                ),
+                "recommended_scenario": "favourable_now",
+                "signal_source": "ml",
+                "explanation_indicator": explanation,
+                "template_id": template_id,
+                "push_title": title,
+                "push_text": body,
+                "currency": currency,
+                "rub_per_unit": rate,
+            }
+        )
+    return pd.DataFrame(rows, columns=PRODUCTION_SIGNAL_COLUMNS)
+
+
+def calendar_reminders_as_of_date(
+    prices: pd.DataFrame,
+    as_of: pd.Timestamp,
+    prefill_available: bool = False,
+) -> pd.DataFrame:
+    """Return neutral reminders exactly on the 5th/20th, with no FX claim."""
+    as_of = pd.Timestamp(as_of).normalize()
+    if as_of.day not in (5, 20):
+        return pd.DataFrame(columns=PRODUCTION_SIGNAL_COLUMNS)
+    causal = prices.loc[
+        prices["date"].le(as_of) & prices["currency"].isin(TARGET_CURRENCIES)
+    ].copy()
+    latest = causal.sort_values("date").groupby("currency", as_index=False).tail(1)
+    rows: list[dict[str, object]] = []
+    for _, row in latest.iterrows():
+        currency = str(row["currency"])
+        copy = CURRENCY_COPY[currency]
+        suffix = "prefilled" if prefill_available else "plain"
+        if prefill_available:
+            body = (
+                f"Сегодня {as_of.day}-е число. Сумма и реквизиты прошлого "
+                "перевода уже заполнены — проверьте их перед подтверждением."
+            )
+        else:
+            body = (
+                f"Сегодня {as_of.day}-е число. Если планировали перевод, "
+                "проверьте актуальные условия в приложении."
+            )
+        rows.append(
+            {
+                "date": as_of,
+                "corridor": f"RUB→{currency}",
+                "indicator": f"calendar_{as_of.day}",
+                "direction": "calendar_neutral",
+                "strength": np.nan,
+                "speed": np.nan,
+                "recommended_scenario": "scheduled_transfer",
+                "signal_source": "calendar_reminder",
+                "explanation_indicator": "calendar_date",
+                "template_id": f"calendar_{as_of.day}_{suffix}",
+                "push_title": f"Напоминание о переводе в {copy['country']}",
+                "push_text": body,
+                "currency": currency,
+                "rub_per_unit": float(row["rub_per_unit"]),
+            }
+        )
+    return pd.DataFrame(rows, columns=PRODUCTION_SIGNAL_COLUMNS)
+
+
+def combined_signals_as_of_date(
+    prices: pd.DataFrame,
+    as_of: pd.Timestamp,
+    prefill_available: bool = False,
+) -> pd.DataFrame:
+    """Build the final causal ML + 5/20 communication stream for one cutoff.
+
+    ML is limited to the first two candidates per currency and Monday-Sunday
+    week, with no ML messages on adjacent calendar days. Calendar reminders are
+    added afterwards and deliberately do not consume the ML quota.
+    """
+    as_of = pd.Timestamp(as_of).normalize()
+    causal_prices = prices.loc[prices["date"].le(as_of)].copy()
+    candidates = cross_h_ml_candidates_as_of_date(causal_prices, as_of)
+
+    # The first calendar week can start in the preceding policy year. Include
+    # just enough of that previous frozen fold to enforce the cap and day gap.
+    week_start = as_of.to_period("W-SUN").start_time
+    required_start = min(week_start, as_of - timedelta(days=2))
+    active_year_start = pd.Timestamp(f"{as_of.year}-01-01")
+    previous_cutoff = active_year_start - timedelta(days=1)
+    has_previous_policy = any(
+        year <= previous_cutoff.year for year in CROSS_H_LEGACY_CHOICES
+    )
+    if required_start < active_year_start and has_previous_policy:
+        previous = cross_h_ml_candidates_as_of_date(
+            causal_prices, previous_cutoff
+        )
+        candidates = pd.concat(
+            [previous.loc[previous["date"].ge(required_start)], candidates],
+            ignore_index=True,
+        ).drop_duplicates(["date", "currency"], keep="last")
+
+    if candidates.empty:
+        ml_today = candidates
+    else:
+        sent_ml = apply_ml_communication_limits(
+            candidates,
+            max_pushes_per_week=2,
+            min_gap_calendar_days=1,
+        )
+        ml_today = sent_ml.loc[sent_ml["date"].eq(as_of)].copy()
+    rendered_ml = render_ml_pushes(ml_today, causal_prices)
+    reminders = calendar_reminders_as_of_date(
+        causal_prices, as_of, prefill_available=prefill_available
+    )
+    streams = [stream for stream in (rendered_ml, reminders) if not stream.empty]
+    if not streams:
+        return pd.DataFrame(columns=PRODUCTION_SIGNAL_COLUMNS)
+    return (
+        pd.concat(streams, ignore_index=True)
+        .sort_values(["date", "corridor", "signal_source"])
+        .reset_index(drop=True)
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -3869,6 +5349,8 @@ def parse_args() -> argparse.Namespace:
             "nightly-tuning",
             "cross-h-reproduction",
             "cross-h-multi-eval",
+            "calendar-reminders",
+            "waiting-cost",
         ),
         default="nested",
         help="Run the main policy or one of the isolated ML ablations.",
@@ -4002,6 +5484,14 @@ def main() -> None:
 
     if args.as_of is None and args.experiment == "cross-h-multi-eval":
         run_cross_h_multi_evaluation(root)
+        return
+
+    if args.as_of is None and args.experiment == "calendar-reminders":
+        run_calendar_reminders(root)
+        return
+
+    if args.as_of is None and args.experiment == "waiting-cost":
+        run_waiting_cost_analysis(root)
         return
 
     prices = load_ml_prices(latest_default_input())

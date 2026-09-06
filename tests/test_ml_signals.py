@@ -10,33 +10,183 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from backtest_ml_signals import (  # noqa: E402
+    PRODUCTION_SIGNAL_COLUMNS,
     SELECTION_COOLDOWN,
     attach_target_stream_frequencies,
     apply_observation_cooldown,
+    apply_ml_communication_limits,
+    apply_weekly_push_cap,
     build_features,
     build_labels,
+    calendar_anchor_candidates,
+    calendar_attractive_mask,
     candidate_gate_mask,
     causal_score_percentiles,
     choose_local_only_thresholds,
     choose_regret_thresholds,
     choose_truth_only_thresholds,
     evaluate_signal_stream_across_horizons,
+    evaluate_fold,
     feature_columns,
     load_brent_features,
     load_ml_prices,
+    match_delayed_hard_confirmations,
     mature_validation_rows,
     model_train_start,
     recalibrate_thresholds,
     recipient_holiday_features,
+    reminders_for_uncovered_anchors,
     recency_weights,
     refit_selected_policy,
     truth_threshold_curve,
     joint_policy_mask,
+    select_calendar_signals,
+    select_mandatory_reminders,
+    signal_distribution_metrics,
+    combine_calendar_with_ml,
+    combined_signals_as_of_date,
+    calendar_reminders_as_of_date,
+    render_ml_pushes,
+    union_ml_and_reminders,
+    unconditional_anchor_reminders,
     union_signal_streams,
 )
 
 
 class MlSignalTest(unittest.TestCase):
+    def test_production_ml_row_has_case_contract_and_factual_copy(self) -> None:
+        prices = self.synthetic_prices(periods=100)
+        signal_date = pd.Timestamp(prices.loc[prices["currency"].eq("TJS"), "date"].max())
+        candidate = pd.DataFrame(
+            {
+                "date": [signal_date], "currency": ["TJS"],
+                "p_good_push_rank": [0.91], "return_mean_3": [-0.002],
+                "streak_length": [1.0], "level_percentile_60": [0.85],
+            }
+        )
+        result = render_ml_pushes(candidate, prices)
+        self.assertEqual(list(result.columns), PRODUCTION_SIGNAL_COLUMNS)
+        row = result.iloc[0]
+        self.assertEqual(row["corridor"], "RUB→TJS")
+        self.assertEqual(row["indicator"], "ml_good_push")
+        self.assertEqual(row["template_id"], "ml_low_level")
+        self.assertAlmostEqual(row["strength"], 0.91)
+        self.assertAlmostEqual(row["speed"], 20.0)
+        self.assertIn("предыдущих 60 публикаций", row["push_text"])
+
+    def test_calendar_reminders_exist_only_on_exact_5_and_20(self) -> None:
+        prices = self.synthetic_prices(periods=100)
+        on_anchor = calendar_reminders_as_of_date(
+            prices, pd.Timestamp("2023-03-20"), prefill_available=False
+        )
+        off_anchor = calendar_reminders_as_of_date(
+            prices, pd.Timestamp("2023-03-21"), prefill_available=False
+        )
+        self.assertEqual(len(on_anchor), len(("AMD", "KGS", "KZT", "TJS", "UZS")))
+        self.assertTrue(on_anchor["indicator"].eq("calendar_20").all())
+        self.assertTrue(on_anchor["template_id"].eq("calendar_20_plain").all())
+        self.assertTrue(off_anchor.empty)
+
+    def test_combined_as_of_is_causal_and_applies_ml_limits(self) -> None:
+        prices = self.synthetic_prices(periods=100)
+        as_of = pd.Timestamp("2023-03-09")
+        candidates = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2023-03-06", "2023-03-07", "2023-03-09"]),
+                "currency": ["AMD"] * 3,
+                "p_good_push_rank": [0.9, 0.91, 0.92],
+                "return_mean_3": [-0.001] * 3,
+                "streak_length": [2.0] * 3,
+                "level_percentile_60": [0.5] * 3,
+                "observation_index": [45, 46, 48],
+            }
+        )
+        seen_max_dates: list[pd.Timestamp] = []
+
+        def fake_candidates(frame: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
+            seen_max_dates.append(pd.Timestamp(frame["date"].max()))
+            return candidates.loc[candidates["date"].le(cutoff)].copy()
+
+        changed = pd.concat(
+            [
+                prices,
+                prices.head(1).assign(
+                    date=as_of + pd.Timedelta(days=10), rub_per_unit=99_999.0
+                ),
+            ],
+            ignore_index=True,
+        )
+        with patch(
+            "backtest_ml_signals.cross_h_ml_candidates_as_of_date",
+            side_effect=fake_candidates,
+        ):
+            result = combined_signals_as_of_date(changed, as_of)
+
+        self.assertTrue(all(date <= as_of for date in seen_max_dates))
+        self.assertEqual(result["date"].tolist(), [as_of])
+        self.assertEqual(result.iloc[0]["indicator"], "ml_good_push")
+
+    def test_production_does_not_repeat_last_ml_signal_without_publication(self) -> None:
+        prices = self.synthetic_prices(periods=100)
+        friday = pd.Timestamp("2023-03-10")
+        saturday = pd.Timestamp("2023-03-11")
+        candidates = pd.DataFrame(
+            {
+                "date": [friday], "currency": ["AMD"],
+                "p_good_push_rank": [0.9], "return_mean_3": [-0.001],
+                "streak_length": [2.0], "level_percentile_60": [0.5],
+                "observation_index": [49],
+            }
+        )
+        with patch(
+            "backtest_ml_signals.cross_h_ml_candidates_as_of_date",
+            return_value=candidates,
+        ):
+            result = combined_signals_as_of_date(prices, saturday)
+        self.assertTrue(result.empty)
+
+    def test_same_day_ml_and_calendar_reminder_are_explicit_rows(self) -> None:
+        prices = self.synthetic_prices(periods=100)
+        as_of = pd.Timestamp("2023-03-20")
+        candidate = pd.DataFrame(
+            {
+                "date": [as_of], "currency": ["AMD"],
+                "p_good_push_rank": [0.9], "return_mean_3": [-0.001],
+                "streak_length": [2.0], "level_percentile_60": [0.5],
+                "observation_index": [55],
+            }
+        )
+        with patch(
+            "backtest_ml_signals.cross_h_ml_candidates_as_of_date",
+            return_value=candidate,
+        ):
+            result = combined_signals_as_of_date(prices, as_of)
+        amd = result.loc[result["currency"].eq("AMD")]
+        self.assertEqual(set(amd["signal_source"]), {"ml", "calendar_reminder"})
+        self.assertEqual(len(amd), 2)
+
+    def test_waiting_confirmation_is_causal_bounded_and_used_once(self) -> None:
+        dates = pd.bdate_range("2025-01-01", periods=8)
+        prices = pd.DataFrame(
+            {
+                "date": dates,
+                "currency": "AMD",
+                "rub_per_unit": [100.0, 99.0, 100.0, 98.0, 99.0, 100.0, 101.0, 102.0],
+            }
+        )
+        ml = pd.DataFrame({"date": dates[[1, 2]], "currency": "AMD"})
+        hard = pd.DataFrame(
+            {"date": dates[[3]], "currency": "AMD", "signal_family": "momentum"}
+        )
+        pairs = match_delayed_hard_confirmations(
+            ml, hard, prices, dates[0], dates[-1] + pd.Timedelta(days=1), 5
+        )
+
+        self.assertEqual(int(pairs["confirmed"].sum()), 1)
+        confirmed = pairs.loc[pairs["confirmed"]].iloc[0]
+        self.assertEqual(confirmed["delay_observations"], 2)
+        self.assertAlmostEqual(confirmed["waiting_cost_bps"], (98 / 99 - 1) * 10_000)
+
     @staticmethod
     def synthetic_prices(periods: int = 160) -> pd.DataFrame:
         dates = pd.bdate_range("2023-01-02", periods=periods)
@@ -52,6 +202,28 @@ class MlSignalTest(unittest.TestCase):
                     }
                 )
         return pd.DataFrame(rows)
+
+    def test_distribution_reports_active_weeks_and_gap_quantiles(self) -> None:
+        dates = pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-12", "2025-01-22"])
+        signals = pd.DataFrame(
+            {
+                "date": dates,
+                "currency": "AMD",
+                "observation_index": [0, 1, 2, 3],
+                "signal_source": "ml",
+                "calendar_fallback": False,
+            }
+        )
+        metrics = signal_distribution_metrics(
+            signals, pd.Timestamp("2025-01-01"), pd.Timestamp("2025-02-01"), "test"
+        ).set_index("currency").loc["AMD"]
+
+        self.assertEqual(metrics["active_week_count"], 3)
+        self.assertEqual(metrics["total_week_count"], 5)
+        self.assertEqual(metrics["max_gap_calendar_days"], 10)
+        self.assertEqual(metrics["gap_calendar_days_q90"], 10)
+        self.assertEqual(metrics["gap_calendar_days_q95"], 10)
+        self.assertEqual(metrics["gap_calendar_days_q99"], 10)
 
     def test_features_at_t_do_not_change_with_future_prices(self) -> None:
         prices = self.synthetic_prices()
@@ -466,6 +638,170 @@ class MlSignalTest(unittest.TestCase):
         union = union_signal_streams(first, second)
         self.assertEqual(len(union), 3)
         self.assertFalse(union.duplicated(["currency", "date"]).any())
+
+    def test_calendar_level_rule_uses_only_trailing_percentile(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "level_percentile_20": [0.79, 0.80, 0.90],
+                "return_lag_0": [-0.1, 0.1, -0.1],
+                "distance_to_min_20_bps": [10, 10, 50],
+                "reversal_after_fall": [0, 0, 0],
+            }
+        )
+        self.assertEqual(
+            calendar_attractive_mask(frame, 20, 0.80, "level_only").tolist(),
+            [False, True, True],
+        )
+        self.assertEqual(
+            calendar_attractive_mask(frame, 20, 0.80, "falling").tolist(),
+            [False, False, True],
+        )
+
+    def test_calendar_mandatory_fallback_is_first_publication_after_anchor(self) -> None:
+        features = build_features(self.synthetic_prices(periods=100))
+        candidates = calendar_anchor_candidates(
+            features, pd.Timestamp("2023-03-01"), pd.Timestamp("2023-05-01"), 3
+        )
+        # An impossible threshold forces the causal deadline fallback.
+        selected = select_calendar_signals(
+            candidates, 20, 1.01, "level_only", mandatory=True
+        )
+        self.assertTrue(selected["calendar_fallback"].all())
+        self.assertTrue(selected["date"].ge(selected["calendar_anchor"]).all())
+        counts = selected.groupby(["currency", "calendar_anchor"]).size()
+        self.assertTrue(counts.eq(1).all())
+
+    def test_calendar_union_is_unique_and_respects_thinning(self) -> None:
+        dates = pd.bdate_range("2024-01-01", periods=8)
+        ml = pd.DataFrame(
+            {
+                "currency": ["AMD"] * 3,
+                "date": dates[[0, 1, 5]],
+                "observation_index": [0, 1, 5],
+            }
+        )
+        calendar = pd.DataFrame(
+            {
+                "currency": ["AMD"] * 2,
+                "date": dates[[0, 3]],
+                "observation_index": [0, 3],
+                "signal_source": ["calendar_attractive"] * 2,
+                "calendar_fallback": [False] * 2,
+            }
+        )
+        result = combine_calendar_with_ml(ml, calendar, cooldown=2)
+        self.assertFalse(result.duplicated(["currency", "date"]).any())
+        self.assertEqual(result.iloc[0]["signal_source"], "ml")
+        self.assertTrue(result["observation_index"].diff().dropna().gt(2).all())
+
+    def test_reminder_policy_covers_every_completed_anchor(self) -> None:
+        features = build_features(self.synthetic_prices(periods=100))
+        candidates = calendar_anchor_candidates(
+            features, pd.Timestamp("2023-03-01"), pd.Timestamp("2023-05-01"), 3
+        )
+        ml = candidates.iloc[0:0][["currency", "date", "observation_index"]]
+        reminders = select_mandatory_reminders(candidates, ml)
+        expected = candidates.groupby(["currency", "calendar_anchor"]).ngroups
+        self.assertEqual(len(reminders), expected)
+        self.assertFalse(reminders.duplicated(["currency", "calendar_anchor"]).any())
+
+    def test_same_day_ml_and_reminder_are_one_combined_communication(self) -> None:
+        ml = pd.DataFrame(
+            {"date": pd.to_datetime(["2025-01-06"]), "currency": ["AMD"],
+             "observation_index": [10], "p_good_push": [0.9]}
+        )
+        reminders = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2025-01-06"]), "currency": ["AMD"],
+                "observation_index": [10], "calendar_anchor": pd.to_datetime(["2025-01-05"]),
+                "anchor_day": [5], "days_from_anchor": [1],
+                "reminder_fallback": [True], "attractive": [False],
+                "recent_ml_signal": [True], "message_fact": ["reminder"],
+            }
+        )
+        combined = union_ml_and_reminders(ml, reminders)
+        self.assertEqual(len(combined), 1)
+        self.assertEqual(combined.iloc[0]["signal_source"], "ml+reminder")
+
+    def test_weekly_cap_keeps_first_two_messages_causally(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "currency": ["AMD"] * 4,
+                "date": pd.to_datetime(
+                    ["2025-01-06", "2025-01-07", "2025-01-08", "2025-01-13"]
+                ),
+                "observation_index": [1, 2, 3, 4],
+            }
+        )
+        result = apply_weekly_push_cap(frame, max_pushes=2)
+        self.assertEqual(
+            result["date"].tolist(),
+            list(pd.to_datetime(["2025-01-06", "2025-01-07", "2025-01-13"])),
+        )
+
+    def test_ml_limits_skip_adjacent_day_but_allow_later_week_signal(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "currency": ["AMD"] * 4,
+                "date": pd.to_datetime(
+                    ["2025-01-06", "2025-01-07", "2025-01-09", "2025-01-10"]
+                ),
+                "observation_index": [1, 2, 3, 4],
+            }
+        )
+        result = apply_ml_communication_limits(
+            frame, max_pushes_per_week=2, min_gap_calendar_days=1
+        )
+        self.assertEqual(
+            result["date"].tolist(),
+            list(pd.to_datetime(["2025-01-06", "2025-01-09"])),
+        )
+        self.assertTrue(result["date"].diff().dropna().dt.days.gt(1).all())
+
+    def test_reminder_is_not_created_when_ml_covers_anchor_window(self) -> None:
+        features = build_features(self.synthetic_prices(periods=100))
+        anchor = pd.DataFrame(
+            {"calendar_anchor": pd.to_datetime(["2023-03-20"]), "anchor_day": [20]}
+        )
+        ml = pd.DataFrame(
+            {
+                "currency": [currency for currency in ("AMD", "KGS", "KZT", "TJS", "UZS")],
+                "date": pd.to_datetime(["2023-03-21"] * 5),
+                "observation_index": [56] * 5,
+            }
+        )
+        reminders, audit = reminders_for_uncovered_anchors(features, ml, anchor)
+        self.assertTrue(reminders.empty)
+        self.assertTrue(audit["covered_by_ml"].all())
+
+    def test_unconditional_reminders_are_exactly_on_every_anchor(self) -> None:
+        features = build_features(self.synthetic_prices(periods=100))
+        anchors = pd.DataFrame(
+            {
+                "calendar_anchor": pd.to_datetime(["2023-03-05", "2023-03-20"]),
+                "anchor_day": [5, 20],
+            }
+        )
+        reminders = unconditional_anchor_reminders(features, anchors)
+        self.assertEqual(len(reminders), 10)
+        self.assertTrue(reminders["date"].eq(reminders["calendar_anchor"]).all())
+
+    def test_benefit_significance_uses_one_sided_test_only(self) -> None:
+        selected = pd.DataFrame(
+            {
+                "currency": ["AMD"], "date": pd.to_datetime(["2025-01-06"]),
+                "observation_index": [1], "truth_now": [1.0], "local_min": [1.0],
+                "benefit_bps": [10.0], "valid": [True],
+            }
+        )
+        pool = selected.copy()
+        inference = {"ci_low": -1.0, "ci_high": 20.0, "p_value": 0.04}
+        with patch("backtest_ml_signals.monthly_block_bootstrap_mean", return_value=inference):
+            metrics = evaluate_fold(
+                selected, pool, 5, pd.Timestamp("2025-01-01"), pd.Timestamp("2025-02-01")
+            )
+        amd = metrics.loc[metrics["currency"].eq("AMD")].iloc[0]
+        self.assertTrue(amd["benefit_significant_5pct"])
 
 
 if __name__ == "__main__":

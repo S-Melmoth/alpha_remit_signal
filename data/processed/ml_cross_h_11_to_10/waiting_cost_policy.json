@@ -1,0 +1,12 @@
+{
+  "fast_policy": "sent ML signal after communication limits",
+  "slow_policy": "first unused causal OOT momentum/level/corridor-down confirmation",
+  "max_wait_observations": 5,
+  "matching": "chronological, within corridor, one hard confirmation per ML episode",
+  "waiting_cost_bps": "(slow rub_per_unit / fast rub_per_unit - 1) * 10000; positive is client cost",
+  "reporting_window": [
+    "2025-01-01",
+    "2026-08-05"
+  ],
+  "no_test_set_tuning": true
+}

@@ -1,0 +1,17 @@
+{
+  "role": "non-financial CRM reminder; excluded from hit/lift/benefit",
+  "anchors": [
+    5,
+    20
+  ],
+  "radius_calendar_days": 0,
+  "ml_limits": "at most two chronological ML pushes per Monday-Sunday week and no ML pushes on adjacent calendar days",
+  "reminder_rule": "one separate CRM reminder exactly on every 5th and 20th; never cancelled by nearby ML; no total-stream cap",
+  "same_day_rule": "same-day ML and reminder remain two separate communications",
+  "strict_control_same_day_rule": "the separate strict-control stream deduplicates same-day ML and reminder",
+  "reporting_window": [
+    "2025-01-01",
+    "2026-08-05"
+  ],
+  "financial_metrics_scope": "only ML rows remaining after the ML-only weekly cap"
+}

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from backtest_hard_signals import (  # noqa: E402
     Candidate,
     build_level_corridor_signals,
+    build_hard_indicator_corridor_report,
     build_signals,
     compute_candidate,
     evaluate_strategies,
@@ -27,6 +28,27 @@ from backtest_hard_signals import (  # noqa: E402
 
 
 class HardSignalTest(unittest.TestCase):
+    def test_final_hard_report_separates_trigger_and_message_roles(self) -> None:
+        common = {
+            "currency": ["AMD", "AMD"],
+            "horizon": [2, 3],
+            "hit_rate": [0.50, 0.45],
+            "random_hit_rate_mean": [0.40, 0.40],
+            "benefit_bps": [20.0, 25.0],
+            "benefit_p_value_vs_zero": [0.01, 0.02],
+        }
+        spike = pd.DataFrame(common).assign(hit_lift=[1.25, 1.125])
+        report = build_hard_indicator_corridor_report(
+            spike,
+            pd.DataFrame(),
+            currencies=("AMD",),
+            horizons=(2, 3),
+        ).iloc[0]
+
+        self.assertFalse(bool(report["standalone_trigger"]))
+        self.assertTrue(bool(report["ml_message_fact_eligible"]))
+        self.assertIn("lift ниже 1.3", report["reason"])
+
     def test_hard_screen_requires_every_currency_horizon_but_ignores_frequency(self) -> None:
         rows = []
         for currency in ("AMD", "KGS"):
