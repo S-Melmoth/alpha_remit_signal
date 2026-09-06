@@ -372,11 +372,13 @@ def monthly_block_bootstrap_mean(
     seed: int,
     confidence: float = 0.95,
 ) -> dict[str, float]:
-    """CI and one-sided p-value for mean(values) > 0.
+    """Percentile CI and one-sided bootstrap tail probability for mean > 0.
 
     Whole calendar months are resampled to retain dependence between nearby
-    and overlapping signal outcomes.  The null distribution is constructed
-    from observations centered to mean zero.
+    and overlapping signal outcomes.  The one-sided value is the smoothed
+    bootstrap probability of a non-positive mean. Computing it from the same
+    distribution as the percentile interval keeps both inference summaries
+    coherent when calendar blocks contain different numbers of signals.
     """
     clean = values.dropna().astype(float).sort_index()
     if clean.empty:
@@ -395,13 +397,18 @@ def monthly_block_bootstrap_mean(
     denominators = block_counts[sampled].sum(axis=1)
     bootstrap_means = block_sums[sampled].sum(axis=1) / denominators
     alpha = 1.0 - confidence
-    ci_low, ci_high = np.quantile(
+    percentile_low, percentile_high = np.quantile(
         bootstrap_means, [alpha / 2.0, 1.0 - alpha / 2.0]
     )
 
-    centered_sums = block_sums - observed * block_counts
-    null_means = centered_sums[sampled].sum(axis=1) / denominators
+    # Test H0: mean <= 0 by centring the block-bootstrap distribution at zero.
+    # Using P(bootstrap_mean <= 0) would leave the distribution centred at the
+    # observed effect and is a confidence-tail measure, not a null test.
+    null_means = bootstrap_means - observed
     p_value = (1 + (null_means >= observed).sum()) / (repeats + 1)
+    # Use the same centred error distribution for the interval and the test.
+    ci_low = 2.0 * observed - percentile_high
+    ci_high = 2.0 * observed - percentile_low
     return {
         "ci_low": float(ci_low),
         "ci_high": float(ci_high),
@@ -1875,6 +1882,101 @@ def relaxed_walk_forward_candidates(
     ).reset_index(drop=True)
 
 
+def build_hard_indicator_corridor_report(
+    spike_metrics: pd.DataFrame,
+    alternative_metrics: pd.DataFrame,
+    currencies: tuple[str, ...] = TARGET_CURRENCIES,
+    horizons: tuple[int, ...] = DEFAULT_HORIZONS,
+) -> pd.DataFrame:
+    """Build the final honest indicator x corridor decision matrix.
+
+    Standalone eligibility follows the case target: every evaluated horizon for
+    the corridor must have lift >= 1.3 and statistically positive benefit.
+    A favourable-now hard family with positive benefit at every horizon may
+    still provide a causal message fact when ML independently selects the day.
+    Realised per-event benefit is never used to choose the message at T.
+    """
+    spike = spike_metrics.copy()
+    if not spike.empty:
+        spike["signal_family"] = "momentum"
+    metrics = pd.concat([spike, alternative_metrics.copy()], ignore_index=True)
+    required = metrics.loc[
+        metrics["currency"].isin(currencies)
+        & metrics["horizon"].isin(horizons)
+    ].copy()
+    expected_horizons = len(horizons)
+    labels = {
+        "momentum": "Momentum",
+        "level": "Низкий уровень",
+        "corridor_exit_down": "Выход вниз из коридора",
+        "corridor_exit_up": "Выход вверх из коридора",
+    }
+    favourable_text_families = {"momentum", "level", "corridor_exit_down"}
+    rows: list[dict[str, object]] = []
+    for (family, currency), group in required.groupby(
+        ["signal_family", "currency"], sort=True
+    ):
+        group = group.drop_duplicates("horizon", keep="last")
+        if group.empty:
+            continue
+        worst_lift = group.loc[group["hit_lift"].idxmin()]
+        min_benefit = float(group["benefit_bps"].min())
+        complete = group["horizon"].nunique() == expected_horizons
+        benefit_positive = bool(complete and min_benefit > 0)
+        benefit_significant = bool(
+            complete
+            and group["benefit_p_value_vs_zero"].notna().all()
+            and group["benefit_p_value_vs_zero"].lt(0.05).all()
+        )
+        lift_pass = bool(complete and group["hit_lift"].ge(1.3).all())
+        standalone = bool(lift_pass and benefit_positive and benefit_significant)
+        text_eligible = bool(
+            family in favourable_text_families and benefit_positive
+        )
+        failed: list[str] = []
+        if not complete:
+            failed.append("неполное покрытие горизонтов")
+        if not lift_pass:
+            failed.append("lift ниже 1.3")
+        if not benefit_positive:
+            failed.append("выгода не положительна")
+        elif not benefit_significant:
+            failed.append("выгода значима не на всех h")
+        rows.append(
+            {
+                "indicator": labels.get(str(family), str(family)),
+                "signal_family": family,
+                "corridor": f"RUB→{currency}",
+                "currency": currency,
+                "evaluated_horizons": "/".join(
+                    str(value) for value in sorted(group["horizon"].astype(int).unique())
+                ),
+                "worst_horizon": int(worst_lift["horizon"]),
+                "hit_rate_signal_at_worst_lift": float(worst_lift["hit_rate"]),
+                "hit_rate_random_at_worst_lift": float(
+                    worst_lift["random_hit_rate_mean"]
+                ),
+                "min_hit_lift": float(worst_lift["hit_lift"]),
+                "median_hit_lift": float(group["hit_lift"].median()),
+                "min_benefit_bps": min_benefit,
+                "median_benefit_bps": float(group["benefit_bps"].median()),
+                "benefit_positive_all_h": benefit_positive,
+                "benefit_significant_all_h": benefit_significant,
+                "standalone_trigger": standalone,
+                "ml_message_fact_eligible": text_eligible,
+                "decision": (
+                    "оставить самостоятельным trigger"
+                    if standalone
+                    else "исключить как самостоятельный trigger"
+                ),
+                "reason": "все критерии выполнены" if standalone else "; ".join(failed),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["signal_family", "currency"]
+    ).reset_index(drop=True)
+
+
 def screen_fixed_level_policies(
     metrics: pd.DataFrame,
     currencies: tuple[str, ...] = TARGET_CURRENCIES,
@@ -2347,6 +2449,12 @@ def main() -> None:
         walk_forward_metrics,
         alternative_walk_forward_metrics,
     )
+    hard_indicator_corridor_report = build_hard_indicator_corridor_report(
+        walk_forward_metrics,
+        alternative_walk_forward_metrics,
+        TARGET_CURRENCIES,
+        args.horizons,
+    )
     level_policy_screen = screen_fixed_level_policies(
         alternative_metrics,
         TARGET_CURRENCIES,
@@ -2450,6 +2558,11 @@ def main() -> None:
     )
     relaxed_candidates.to_csv(
         args.output_dir / "relaxed_walk_forward_candidates.csv",
+        index=False,
+        lineterminator="\n",
+    )
+    hard_indicator_corridor_report.to_csv(
+        args.output_dir / "hard_indicator_corridor_report.csv",
         index=False,
         lineterminator="\n",
     )

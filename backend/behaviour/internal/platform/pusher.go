@@ -88,7 +88,12 @@ func deliverUser(ctx context.Context, db *sql.DB, user string, now time.Time) (i
     AND t.occurred_at>=i.occurred_at AND t.occurred_at<=$2 AND t.recorded_at<=$2))
  UNION ALL
  SELECT 'global:'||id,type,body,CASE type WHEN 'history' THEN 1 ELSE 2 END,created_at
- FROM global_notifications WHERE created_at<=$2 AND expires_at>$2
+ FROM global_notifications g WHERE created_at<=$2 AND expires_at>$2
+ AND (COALESCE(g.metadata->>'source','') <> 'fx-ml' OR EXISTS (
+   SELECT 1 FROM transfers t WHERE t.user_id=$1 AND t.kind='cross_border'
+   AND t.status='completed'
+   AND t.destination_currency=g.metadata->>'destination_currency'
+ ))
  ) SELECT key,type,body FROM candidates c
  WHERE NOT EXISTS (SELECT 1 FROM completed_push p WHERE p.user_id=$1 AND p.source_key=c.key)
  ORDER BY priority,created,key LIMIT $5`, user, now, model.Version, BehaviourMessage, 2-used)

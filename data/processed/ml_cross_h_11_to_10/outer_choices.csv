@@ -1,0 +1,5 @@
+outer_start,effective_evaluation_end,train_horizon,evaluation_horizon,model_config,score_lookback,joint_quantile
+2023-01-01,2023-12-31,11,10,deep_regularized,60,0.825
+2024-01-01,2024-12-30,11,10,deep_smooth,504,0.8
+2025-01-01,2026-01-01,11,10,deep_smooth,504,0.8
+2026-01-01,2026-08-19,11,10,baseline_long,504,0.7

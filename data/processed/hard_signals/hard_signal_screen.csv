@@ -1,5 +1,0 @@
-signal_family,evaluated_cells,expected_cells,coverage_complete,min_hit_lift,median_hit_lift,worst_lift_currency,worst_lift_horizon,hit_rate_signal_at_worst_lift,hit_rate_random_at_worst_lift,min_benefit_bps,median_benefit_bps,worst_benefit_currency,worst_benefit_horizon,lift_floor,benefit_floor_bps,passes_hard_screen
-corridor_exit_up,20,20,True,1.1489074115791842,1.4437784502422262,AMD,4,0.5862068965517241,0.5102298850574714,-70.10504292011743,-14.488000607819863,KZT,4,1.2,-5.0,False
-corridor_exit_down,20,20,True,0.5955757231990924,0.8644922217179273,KGS,3,0.20588235294117646,0.34568627450980394,12.795437919825718,46.52160782382847,KGS,5,1.2,-5.0,False
-momentum,20,20,True,0.5617977528089888,0.9002255628942286,KGS,4,0.1875,0.33375,30.00311452056453,54.05629467810337,TJS,2,1.2,-5.0,False
-level,20,20,True,0.5614035087719299,0.7983143822118718,KGS,4,0.17777777777777778,0.31666666666666665,13.849702322509218,41.79006888414487,UZS,3,1.2,-5.0,False

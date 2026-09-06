@@ -64,6 +64,18 @@ func (a API) Handler(service string) http.Handler {
 			}
 			reply(w, 200, map[string]any{"history": h})
 		})
+		mux.HandleFunc("POST /api/ml-signals", func(w http.ResponseWriter, r *http.Request) {
+			var input MLSignalBatch
+			if !decode(w, r, &input) {
+				return
+			}
+			saved, err := SaveMLSignals(r.Context(), a.DB, input, a.Now())
+			if err != nil {
+				failure(w, 400, err.Error())
+				return
+			}
+			reply(w, 200, map[string]int{"received": len(input.Signals), "inserted": saved})
+		})
 	}
 	if service == "pusher" {
 		mux.HandleFunc("GET /api/notifications", func(w http.ResponseWriter, r *http.Request) { a.table(w, r, "completed_push") })
@@ -164,7 +176,17 @@ func (a API) Handler(service string) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
-		if r.URL.Path != "/health" {
+		if r.URL.Path == "/api/ml-signals" {
+			token := os.Getenv("ML_INGEST_TOKEN")
+			if token == "" {
+				failure(w, 503, "ML ingestion is disabled")
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				failure(w, 401, "invalid ML ingestion token")
+				return
+			}
+		} else if r.URL.Path != "/health" {
 			user := r.Header.Get("X-User-ID")
 			if user == "" {
 				failure(w, 401, "X-User-ID demo identity required")
