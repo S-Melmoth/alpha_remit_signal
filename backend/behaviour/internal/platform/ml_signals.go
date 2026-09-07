@@ -97,7 +97,7 @@ func SaveMLSignals(ctx context.Context, db *sql.DB, batch MLSignalBatch, now tim
 		body := signal.PushTitle + "\n" + signal.PushText
 		result, err := tx.ExecContext(ctx, `
 INSERT INTO global_notifications(id,type,body,created_at,expires_at,metadata)
-VALUES($1,'history',$2,$3,$3 + interval '24 hours',$4::jsonb)
+VALUES($1,'history',$2,$3::timestamptz,$3::timestamptz + interval '24 hours',$4::jsonb)
 ON CONFLICT (id) DO NOTHING`, id, body, now, string(metadata))
 		if err != nil {
 			return 0, err
